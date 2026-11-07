@@ -1,4 +1,3 @@
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
@@ -46,18 +45,33 @@ internal sealed class PatchInstallation
         {
             throw new InvalidOperationException($"Only verified Yandex Music {AsarPatch.Version} is supported.");
         }
-        AssertClosed();
-
         var lockPath = Path.Combine(_root, ".musicsync-together.lock");
         CheckPath(lockPath);
         using var installLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
             bufferSize: 4096, FileOptions.DeleteOnClose);
+        using var music = new YandexMusicProcess(_exe);
+        bool completed = false;
+        try
+        {
+            Apply(install, music);
+            completed = true;
+        }
+        finally
+        {
+            try { RestartIfSafe(music); }
+            catch (Exception error) when (!completed) { Console.Error.WriteLine(error.Message); }
+        }
+    }
+
+    private void Apply(bool install, YandexMusicProcess music)
+    {
         CheckPaths();
         var receipt = ReadReceipt();
         var current = HashPair(_asar, _exe);
 
         if (receipt is { Phase: Phase.Installing or Phase.Removing })
         {
+            music.Close();
             RestoreOriginals(receipt);
             receipt = null;
             current = Originals;
@@ -77,6 +91,8 @@ internal sealed class PatchInstallation
 
             VerifyPayload(_payload, receipt, allowMissing: true);
             AssertBackups();
+            music.Close();
+            AssertClosed();
             WriteReceipt(receipt with { Phase = Phase.Removing });
             RestoreOriginals(receipt);
             Console.WriteLine("The original Yandex Music files were restored and verified.");
@@ -107,15 +123,17 @@ internal sealed class PatchInstallation
             return;
         }
 
-        if (receipt is not null)
-        {
-            RemovePayload(receipt);
-        }
-        else if (Directory.Exists(_payload) || File.Exists(_payload))
+        if (receipt is null && (Directory.Exists(_payload) || File.Exists(_payload)))
         {
             throw new InvalidOperationException("An unrecognized MusicSync payload already exists.");
         }
 
+        music.Close();
+        AssertClosed();
+        if (receipt is not null)
+        {
+            RemovePayload(receipt);
+        }
         ClearState();
         Install(scripts, agentHash, configHash, bundleHash);
     }
@@ -181,7 +199,7 @@ internal sealed class PatchInstallation
             throw new IOException($"Installation failed. The original files were preserved or restored. {error.Message}", error);
         }
 
-        Console.WriteLine("MusicSync Together installed. Start Yandex Music to open the Together panel.");
+        Console.WriteLine("MusicSync Together installed.");
     }
 
     private void RestoreOriginals(Receipt receipt)
@@ -231,29 +249,24 @@ internal sealed class PatchInstallation
 
     private void AssertClosed()
     {
-        foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(_exe)))
+        if (YandexMusicProcess.IsRunning(_exe))
         {
-            using (process)
-            {
-                string? runningPath;
-                try
-                {
-                    runningPath = process.MainModule?.FileName;
-                }
-                catch (Win32Exception)
-                {
-                    continue;
-                }
-                catch (InvalidOperationException)
-                {
-                    continue;
-                }
-                if (string.Equals(runningPath, _exe, StringComparison.OrdinalIgnoreCase))
-                {
-                    throw new InvalidOperationException("Close Yandex Music in this directory before applying or removing the patch.");
-                }
-            }
+            throw new InvalidOperationException("Yandex Music is still running in this directory. Close it and retry.");
         }
+    }
+
+    private void RestartIfSafe(YandexMusicProcess music)
+    {
+        if (!music.RestartPending)
+        {
+            return;
+        }
+        var current = HashPair(_asar, _exe);
+        if (current != Originals && (ReadReceipt() is not { Phase: Phase.Installed } receipt || current != receipt.Patched))
+        {
+            throw new IOException("Yandex Music files need recovery before the application can be restarted.");
+        }
+        music.Restart();
     }
 
     private void CheckPaths()

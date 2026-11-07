@@ -10,12 +10,11 @@
 .\scripts\Publish-Together.ps1 -Endpoint 'wss://music.example.net:8443/ws'
 ```
 
-Распакуйте ZIP из `dist` целиком. Для проверки используйте отдельную копию каталога Яндекс Музыки и запускайте её с отдельным профилем. Закройте тестовый экземпляр перед установкой и удалением патча.
+Распакуйте ZIP из `dist` целиком. Для проверки используйте отдельную копию каталога Яндекс Музыки и запускайте её с отдельным профилем. Установщик штатно закроет открытый экземпляр из указанного каталога и снова запустит его с теми же параметрами.
 
 ```powershell
 .\MusicSync.Patch.exe install 'C:\Test\YandexMusic'
 Start-Process -FilePath 'C:\Test\YandexMusic\Яндекс Музыка.exe' -ArgumentList '--user-data-dir=C:\Test\YandexMusicProfile'
-# После проверки закройте тестовый экземпляр.
 .\MusicSync.Patch.exe uninstall 'C:\Test\YandexMusic'
 ```
 
