@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text.Json;
 
@@ -10,6 +11,13 @@ public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, 
 
 public sealed class RoomConnection : IAsyncDisposable
 {
+    private static readonly HttpMessageInvoker Ipv4WebSocketInvoker = new(new SocketsHttpHandler
+    {
+        PooledConnectionLifetime = TimeSpan.Zero,
+        UseCookies = false,
+        ConnectCallback = ConnectTcpAsync
+    });
+
     private sealed class Transport : IDisposable
     {
         public ClientWebSocket Socket { get; } = new();
@@ -149,7 +157,9 @@ public sealed class RoomConnection : IAsyncDisposable
             {
                 using var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
                 connectTimeout.CancelAfter(TimeSpan.FromSeconds(5));
-                await socket.ConnectAsync(endpoint, connectTimeout.Token);
+                var invoker = endpoint.Scheme == "wss" && endpoint.HostNameType == UriHostNameType.IPv4
+                    ? Ipv4WebSocketInvoker : null;
+                await socket.ConnectAsync(endpoint, invoker, connectTimeout.Token);
                 await SendAsync(transport, new(Protocol.Version,
                     joined is not null ? "resume" : invitation is not null ? "join" : "create",
                     Token: token, RoomId: joined ?? invitation), connectTimeout.Token);
@@ -260,6 +270,26 @@ public sealed class RoomConnection : IAsyncDisposable
 
     private void ObservePong(ServerMessage message) =>
         Clock.Add(message.Ping!.Value, message.Received!.Value, message.Sent!.Value, Clock.LocalNow);
+
+    private static async ValueTask<Stream> ConnectTcpAsync(SocketsHttpConnectionContext context, CancellationToken token)
+    {
+        var remote = context.DnsEndPoint;
+        // Some Windows split tunnels reject dual-mode sockets connecting to an IPv4 address.
+        var socket = Uri.CheckHostName(remote.Host) == UriHostNameType.IPv4
+            ? new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+            : new Socket(SocketType.Stream, ProtocolType.Tcp);
+        try
+        {
+            socket.NoDelay = true;
+            await socket.ConnectAsync(remote, token).ConfigureAwait(false);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
 
     private void End(string reason)
     {

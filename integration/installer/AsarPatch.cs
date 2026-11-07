@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Globalization;
+using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,7 +14,7 @@ internal static class AsarPatch
     internal static readonly string[] AddedFiles = ["bootstrap.cjs", "main.cjs", "renderer.js", "renderer.css"];
     internal const string PreloadName = "preload.cjs";
 
-    internal static (string Original, string Patched) Build(string sourcePath, string destinationPath, string scripts)
+    internal static (string Original, string Patched) Build(string sourcePath, string destinationPath)
     {
         using var source = File.OpenRead(sourcePath);
         var originalHeader = ReadHeader(source);
@@ -30,7 +31,7 @@ internal static class AsarPatch
         package["main"] = "./musicsync-together/bootstrap.cjs";
         var preload = ReadFile(source, dataStart, files, "preload.js");
         var combinedPreload = preload.Concat("\n;\n"u8.ToArray())
-            .Concat(File.ReadAllBytes(Path.Combine(scripts, PreloadName))).ToArray();
+            .Concat(ReadScript(PreloadName)).ToArray();
         var injected = new JsonObject();
         files.Add(DirectoryName, new JsonObject { ["files"] = injected });
 
@@ -41,7 +42,7 @@ internal static class AsarPatch
         Append(files, "preload.js", combinedPreload);
         foreach (var name in AddedFiles)
         {
-            Append(injected, name, File.ReadAllBytes(Path.Combine(scripts, name)));
+            Append(injected, name, ReadScript(name));
         }
 
         var patchedHeader = JsonSerializer.SerializeToUtf8Bytes(header);
@@ -81,6 +82,15 @@ internal static class AsarPatch
             appended.Add(content);
             offset += content.Length;
         }
+    }
+
+    internal static byte[] ReadScript(string name)
+    {
+        using var script = typeof(AsarPatch).Assembly.GetManifestResourceStream("Electron." + name) ??
+            throw new InvalidDataException($"MusicSync script is missing: {name}");
+        var content = new byte[script.Length];
+        script.ReadExactly(content);
+        return content;
     }
 
     private static byte[] ReadHeader(Stream source)

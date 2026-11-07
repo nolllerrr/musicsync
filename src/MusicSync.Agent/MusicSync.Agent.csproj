@@ -5,6 +5,7 @@
     <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="MusicSync.Patch" />
     <ProjectReference Include="../MusicSync.Core/MusicSync.Core.csproj" />
     <ProjectReference Include="../MusicSync.Yandex/MusicSync.Yandex.csproj" />
   </ItemGroup>

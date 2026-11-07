@@ -1,6 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <PlatformTarget>x64</PlatformTarget>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.Management" Version="10.0.14" />
+    <ProjectReference Include="../../src/MusicSync.Agent/MusicSync.Agent.csproj" />
+    <EmbeddedResource Include="../electron/*.*" LogicalName="Electron.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="$(DefaultEndpointFile)" LogicalName="DefaultEndpoint" Condition="'$(DefaultEndpointFile)' != ''" />
+  </ItemGroup>
 </Project>
