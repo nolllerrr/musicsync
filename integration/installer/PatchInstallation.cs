@@ -37,14 +37,6 @@ internal sealed class PatchInstallation
     internal void Run(bool install)
     {
         CheckPaths();
-        if (!File.Exists(_exe) || !File.Exists(_asar))
-        {
-            throw new InvalidOperationException("The Yandex Music executable and resources/app.asar are required.");
-        }
-        if (FileVersionInfo.GetVersionInfo(_exe).ProductVersion != ProductVersion)
-        {
-            throw new InvalidOperationException($"Only verified Yandex Music {AsarPatch.Version} is supported.");
-        }
         var lockPath = Path.Combine(_root, ".musicsync-together.lock");
         CheckPath(lockPath);
         using var installLock = new FileStream(lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None,
@@ -67,15 +59,23 @@ internal sealed class PatchInstallation
     {
         CheckPaths();
         var receipt = ReadReceipt();
-        var current = HashPair(_asar, _exe);
 
         if (receipt is { Phase: Phase.Installing or Phase.Removing })
         {
             music.Close();
             RestoreOriginals(receipt);
             receipt = null;
-            current = Originals;
         }
+
+        if (!File.Exists(_exe) || !File.Exists(_asar))
+        {
+            throw new InvalidOperationException("The Yandex Music executable and resources/app.asar are required.");
+        }
+        if (FileVersionInfo.GetVersionInfo(_exe).ProductVersion != ProductVersion)
+        {
+            throw new InvalidOperationException($"Only verified Yandex Music {AsarPatch.Version} is supported.");
+        }
+        var current = HashPair(_asar, _exe);
 
         if (!install)
         {
@@ -205,23 +205,25 @@ internal sealed class PatchInstallation
     private void RestoreOriginals(Receipt receipt)
     {
         AssertClosed();
-        var current = HashPair(_asar, _exe);
-        if ((current.Asar != Originals.Asar && current.Asar != receipt.Patched.Asar) ||
-            (current.Exe != Originals.Exe && current.Exe != receipt.Patched.Exe))
+        // A failed ReplaceFile can remove the destination. The journal still owns the recovery.
+        var asarHash = HashIfPresent(_asar);
+        var exeHash = HashIfPresent(_exe);
+        if ((asarHash is not null && asarHash != Originals.Asar && asarHash != receipt.Patched.Asar) ||
+            (exeHash is not null && exeHash != Originals.Exe && exeHash != receipt.Patched.Exe))
         {
             throw new InvalidOperationException("Recovery stopped because Yandex Music files have unrecognized checksums.");
         }
-        if (current != Originals)
+        if (asarHash != Originals.Asar || exeHash != Originals.Exe)
         {
             AssertBackups();
         }
-        if (current.Asar != Originals.Asar)
+        if (asarHash != Originals.Asar)
         {
-            RestoreFile("original.asar", _asar, current.Asar);
+            RestoreFile("original.asar", _asar, asarHash);
         }
-        if (current.Exe != Originals.Exe)
+        if (exeHash != Originals.Exe)
         {
-            RestoreFile("original.exe", _exe, current.Exe);
+            RestoreFile("original.exe", _exe, exeHash);
         }
         if (HashPair(_asar, _exe) != Originals)
         {
@@ -232,11 +234,18 @@ internal sealed class PatchInstallation
         ClearState();
     }
 
-    private void RestoreFile(string original, string target, string currentHash)
+    private void RestoreFile(string original, string target, string? currentHash)
     {
         var temporary = StatePath("restore.tmp");
         File.Copy(StatePath(original), temporary, overwrite: true);
-        ReplaceIfMatching(temporary, target, currentHash);
+        if (currentHash is null)
+        {
+            File.Move(temporary, target);
+        }
+        else
+        {
+            ReplaceIfMatching(temporary, target, currentHash);
+        }
     }
 
     private void AssertBackups()
@@ -425,6 +434,12 @@ internal sealed class PatchInstallation
     }
 
     private static Pair HashPair(string asar, string exe) => new(Hash(asar), Hash(exe));
+
+    private static string? HashIfPresent(string path)
+    {
+        try { return Hash(path); }
+        catch (FileNotFoundException) { return null; }
+    }
 
     private static string Hash(string path)
     {

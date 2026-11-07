@@ -45,6 +45,8 @@ function install() {
   let ready = false;
   let revision = 0;
   let agent;
+  let evaluation;
+  let nextTicket = 0;
   let state = initialState;
   let quitting = false;
   let stopped = false;
@@ -114,9 +116,12 @@ function install() {
     const target = contents;
     const observedRevision = revision;
     const response = { type: 'evalResult', id: message.id };
-    if (!ready || !target || target.isDestroyed() || target.isLoadingMainFrame() || !isDesktop(target.getURL())) {
+    if (current.stopping || !ready || !target || target.isDestroyed() || target.isLoadingMainFrame() ||
+        !isDesktop(target.getURL())) {
       response.error = 'no-player';
     } else {
+      const active = { id: message.id, ticket: ++nextTicket, revision: observedRevision };
+      evaluation = active;
       try {
         // executeJavaScript can wait for an in-progress load. Check the destination again in the page.
         const result = await target.executeJavaScript(`(() => {
@@ -124,12 +129,16 @@ function install() {
           if (url.protocol !== 'music-application:' || url.host !== 'desktop' || url.username || url.password) {
             return { error: 'no-player' };
           }
+          const isMusicSyncEvaluationCurrent = () =>
+            window.musicSyncTogether?.isEvaluationCurrent(${active.ticket}) === true;
           return (${message.expression});
         })()`);
         if (observedRevision !== revision || target !== contents) response.error = 'no-player';
         else response.result = result ?? null;
       } catch {
         response.error = 'sonata-command-failed';
+      } finally {
+        if (evaluation === active) evaluation = undefined;
       }
     }
     if (agent === current) current.send(response);
@@ -140,11 +149,14 @@ function install() {
     if (message?.type === 'state' && statuses.has(message.status)) {
       const { type, ...snapshot } = message;
       setState(snapshot);
+      if (snapshot.status === 'ended') void current.stop();
     } else if (message?.type === 'result') {
       current.resolve(message.id, message.error);
     } else if (message?.type === 'evaluate' && Number.isSafeInteger(message.id) && message.id > 0 &&
         typeof message.expression === 'string' && message.expression.length <= 64 * 1024) {
       void evaluate(current, message);
+    } else if (message?.type === 'cancelEvaluation' && evaluation?.id === message.id) {
+      evaluation = undefined;
     }
   }
 
@@ -165,15 +177,22 @@ function install() {
     current.exited.then(() => {
       if (agent !== current) return;
       agent = undefined;
-      if (quitting) return;
+      evaluation = undefined;
+      if (quitting || current.stopping && state.status === 'idle') return;
       if (!state.error || state.status !== 'ended') setState({ status: 'ended', error: 'agent-unavailable' });
     });
     return current;
   }
 
-  ipcMain.handle(namespace + 'command', (event, name, argument) => {
+  ipcMain.on(namespace + 'evaluation-current', (event, ticket) => {
+    // Keep the check and the following player call in the same renderer task.
+    event.returnValue = Boolean(trusted(event) && agent && !agent.stopping &&
+      evaluation?.ticket === ticket && evaluation?.revision === revision);
+  });
+
+  ipcMain.handle(namespace + 'command', async (event, name, argument) => {
     if (!trusted(event) || quitting) return { error: 'invalid-command' };
-    if (name !== 'create' && name !== 'join' && name !== 'swapRoles' && name !== 'leave') {
+    if (name !== 'create' && name !== 'join' && name !== 'swapRoles' && name !== 'retryPlayback' && name !== 'leave') {
       return { error: 'invalid-command' };
     }
 
@@ -188,6 +207,12 @@ function install() {
       parameters.swapId = argument;
     }
 
+    if (name === 'leave') return agent ? agent.stop('leave') : { error: 'no-room' };
+
+    if (name === 'create' || name === 'join') {
+      if (agent?.stopping) await agent.exited;
+      if (!trusted(event) || quitting) return { error: 'invalid-command' };
+    }
     if (!agent) {
       if (name !== 'create' && name !== 'join') return { error: 'no-room' };
       const started = startAgent();
@@ -195,6 +220,7 @@ function install() {
       agent = started;
       setState({ status: 'connecting' });
     }
+    if (agent.stopping) return { error: 'no-room' };
     return agent.command(name, parameters);
   });
 
@@ -224,6 +250,7 @@ function createAgent(child, onMessage) {
   const pending = new Map();
   let nextId = 1;
   let closed = false;
+  let stopping;
 
   function resolve(id, error) {
     const request = pending.get(id);
@@ -272,18 +299,23 @@ function createAgent(child, onMessage) {
     });
   }
 
-  async function stop() {
+  async function stop(commandName) {
     const timeout = setTimeout(() => child.kill(), 8_000);
     try {
-      await command('shutdown', {}, 7_500);
+      const result = await command(commandName, {}, 7_500);
       child.stdin.end();
       await exited;
+      return result;
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  return { send, command, resolve, stop, exited };
+  return {
+    send, command, resolve, exited,
+    get stopping() { return Boolean(stopping); },
+    stop: (commandName = 'shutdown') => stopping ??= stop(commandName)
+  };
 }
 
 module.exports = { install };

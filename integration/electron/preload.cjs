@@ -11,7 +11,9 @@
     create: () => command('create'),
     join: code => command('join', code),
     swapRoles: requestId => command('swapRoles', requestId),
+    retryPlayback: () => command('retryPlayback'),
     leave: () => command('leave'),
+    isEvaluationCurrent: ticket => ipcRenderer.sendSync('musicsync-together:evaluation-current', ticket),
     copyCode: () => ipcRenderer.invoke('musicsync-together:copy-code'),
     subscribe: listener => {
       const receive = (_event, state) => listener(state);

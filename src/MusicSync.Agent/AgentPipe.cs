@@ -19,6 +19,11 @@ internal sealed record AgentEvaluation(int Id, string Expression)
     public string Type => "evaluate";
 }
 
+internal sealed record AgentEvaluationCancellation(int Id)
+{
+    public string Type => "cancelEvaluation";
+}
+
 internal sealed class AgentPipe(StreamReader input, TextWriter output) : ISonataTransport
 {
     private const int MaxLineLength = 64 * 1024;
@@ -93,8 +98,10 @@ internal sealed class AgentPipe(StreamReader input, TextWriter output) : ISonata
                 throw new PlayerException("sonata-command-failed");
             return result;
         }
-        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
+            Send(new AgentEvaluationCancellation(id));
+            token.ThrowIfCancellationRequested();
             throw new PlayerException(Disconnected.IsCancellationRequested ? "no-player" : "sonata-command-failed");
         }
         finally { evaluations.TryRemove(id, out _); }

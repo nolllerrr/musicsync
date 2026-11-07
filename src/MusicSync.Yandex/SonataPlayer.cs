@@ -65,10 +65,12 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
                 queueParams: {entityId: expected.trackId, index: 0, shuffle: false}
             };
             const previousContext = core.getState().currentContext?.value?.data;
+            if (!canMutate()) return {error: 'sonata-command-failed'};
             if (active() && previousContext?.type === 'album' && idText(previousContext.meta?.id) === expected.albumId) {
                 // playContext reuses the old queue for the same album. Rebuild and verify the selection first.
                 await core.setContext(request);
                 if (!sameTrack(queuedTrack(), expected)) return {error: 'track-unconfirmed'};
+                if (!canMutate()) return {error: 'sonata-command-failed'};
                 await active().play();
             } else {
                 await core.playContext(request);
@@ -93,7 +95,10 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
             const before = read();
             if (expected && !sameTrack(before, expected)) return {error: 'track-unconfirmed'};
             if (!active()) return {error: 'no-session'};
-            if (before.status !== '{{status}}') await active().{{method}}();
+            if (before.status !== '{{status}}') {
+                if (!canMutate()) return {error: 'sonata-command-failed'};
+                await active().{{method}}();
+            }
             return confirm(sample => (!expected || sameTrack(sample, expected)) && sample.status === '{{status}}',
                 'command-unconfirmed');
             """, token);
@@ -108,6 +113,7 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
             const before = read();
             if (!sameTrack(before, expected)) return {error: 'track-unconfirmed'};
             const position = Math.min({{position}}, before.durationMs - 1);
+            if (!canMutate()) return {error: 'sonata-command-failed'};
             await active().setProgress(position / 1000);
             return confirm(sample => sameTrack(sample, expected) && Math.abs(sample.positionMs - position) <= 250,
                 'position-unconfirmed');
@@ -150,6 +156,8 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
     // Sonata is in the page's React tree. Every evaluation resolves the current provider again,
     // so a reload or an app restart cannot leave a stale controller in MusicSync.
     private const string Prelude = """
+        const canMutate = () => typeof isMusicSyncEvaluationCurrent !== 'function' || isMusicSyncEvaluationCurrent();
+
         function findCore() {
             const roots = new Set();
             const elements = [document.getElementById('__next'), document.getElementById('root'), document.body];
