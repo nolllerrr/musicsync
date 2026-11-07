@@ -37,6 +37,15 @@
     offline: 'Сервер недоступен.',
     'no-room': 'Комната недоступна.'
   };
+  const playbackErrors = {
+    'no-player': 'Плеер недоступен.',
+    'no-session': 'Откройте трек в плеере.',
+    'track-unavailable': 'Трек недоступен в плеере.',
+    'track-unconfirmed': 'Плеер не подтвердил нужный трек.',
+    'command-unconfirmed': 'Плеер не подтвердил команду.',
+    'position-unconfirmed': 'Плеер не подтвердил позицию.',
+    'track-ended': 'Трек закончился.'
+  };
 
   function element(tag, attributes = {}, text = '') {
     const node = document.createElement(tag);
@@ -98,6 +107,10 @@
   const peer = element('dd');
   const details = element('dl');
   details.append(element('dt', {}, 'Ваша роль'), role, element('dt', {}, 'Второй участник'), peer);
+  const playback = element('div', { class: 'music-sync-together-stack', hidden: '' });
+  const playbackError = element('p', { class: 'music-sync-together-error', role: 'alert' });
+  const retry = element('button', { type: 'button' }, 'Повторить синхронизацию');
+  playback.append(playbackError, retry);
 
   const swapRequest = element('div', { class: 'music-sync-together-stack music-sync-together-request', hidden: '' });
   const swapMessage = element('p');
@@ -108,7 +121,7 @@
   const swap = element('button', { type: 'button' }, 'Сменить роли');
   const leave = element('button', { type: 'button' }, 'Выйти');
   actions.append(swap, leave);
-  room.append(codeHeading, codeRow, details, swapRequest, actions);
+  room.append(codeHeading, codeRow, details, playback, swapRequest, actions);
   panel.append(title, connection, error, enter, room);
   document.body.append(panel);
 
@@ -152,6 +165,11 @@
     setText(role, snapshot.role === 'leader' ? 'Ведущий' : snapshot.role === 'listener' ? 'Слушатель' : '—');
     setText(peer, snapshot.status === 'reconnecting' ? 'Статус неизвестен' :
       snapshot.peerConnected ? 'В комнате' : 'Ожидание участника');
+    playback.hidden = !snapshot.playbackError;
+    setText(playbackError, snapshot.playbackError
+      ? playbackErrors[snapshot.playbackError] ?? 'Не удалось синхронизировать воспроизведение.'
+      : '');
+    retry.disabled = pending || snapshot.status !== 'connected';
     swap.disabled = !canSwap || swapPending;
     leave.disabled = pending;
     swapRequest.hidden = !swapPending;
@@ -213,6 +231,7 @@
   });
   swap.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
   confirm.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
+  retry.addEventListener('click', () => void run(api.retryPlayback));
   leave.addEventListener('click', () => void run(api.leave));
   copy.addEventListener('click', async () => {
     try {

@@ -6,7 +6,7 @@ namespace MusicSync.Agent;
 internal sealed record AgentSwap(Guid Id, Role? RequestedBy, long? RemainingMs);
 
 internal sealed record AgentState(string Status, Role? Role = null, string? Code = null,
-    bool? PeerConnected = null, string? Error = null, AgentSwap? Swap = null)
+    bool? PeerConnected = null, string? Error = null, AgentSwap? Swap = null, string? PlaybackError = null)
 {
     public string Type => "state";
 }
@@ -15,23 +15,23 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
 {
     private const long CorrectionThresholdMs = 1200;
     private volatile RoomConnection? connection;
-    private RoomPlayer? player;
+    private volatile RoomPlayer? player;
 
     public async Task RunAsync()
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(pipe.Disconnected);
         _ = Task.Run(pipe.ReadAsync);
         var publish = PublishAsync(lifetime.Token);
+        AgentInput? exitCommand = null;
         try
         {
             await foreach (var command in pipe.Commands.ReadAllAsync(lifetime.Token))
             {
                 lifetime.Token.ThrowIfCancellationRequested();
-                if (command.Command == "shutdown")
+                if (command.Command is "shutdown" or "leave")
                 {
-                    await LeaveAsync();
-                    pipe.Send(new AgentResult(command.Id));
-                    return;
+                    exitCommand = command;
+                    break;
                 }
 
                 var error = command.Command switch
@@ -39,7 +39,7 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
                     "create" => await ConnectAsync(null),
                     "join" => await JoinAsync(command.Code),
                     "swapRoles" => await SwapAsync(command.SwapId),
-                    "leave" => await LeaveAsync(),
+                    "retryPlayback" => RetryPlayback(),
                     _ => "invalid-command"
                 };
                 pipe.Send(new AgentResult(command.Id, error));
@@ -49,8 +49,15 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
         finally
         {
             await lifetime.CancelAsync();
-            await LeaveAsync();
             await publish;
+            await LeaveAsync();
+        }
+
+        if (exitCommand is not null)
+        {
+            if (exitCommand.Command == "leave")
+                pipe.Send(new AgentState("idle"));
+            pipe.Send(new AgentResult(exitCommand.Id));
         }
     }
 
@@ -86,7 +93,15 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
         return await room.SwapRolesAsync(swap.Id);
     }
 
-    private async Task<string?> LeaveAsync()
+    private string? RetryPlayback()
+    {
+        if (connection?.View.Status != ConnectionStatus.Connected || player is not { } activePlayer)
+            return "offline";
+        activePlayer.Retry();
+        return null;
+    }
+
+    private async Task LeaveAsync()
     {
         var room = connection;
         var activePlayer = player;
@@ -97,7 +112,6 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
             var stopPlayer = activePlayer is null ? Task.CompletedTask : activePlayer.DisposeAsync().AsTask();
             await Task.WhenAll(stopPlayer, room.LeaveAsync());
         }
-        return null;
     }
 
     private async Task PublishAsync(CancellationToken token)
@@ -109,7 +123,7 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
             do
             {
                 var state = GetState();
-                if (state != previous)
+                if (state is not null && state != previous)
                 {
                     pipe.Send(state);
                     previous = state;
@@ -119,11 +133,11 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 
-    private AgentState GetState()
+    private AgentState? GetState()
     {
         var room = connection;
         if (room is null)
-            return new("idle");
+            return null;
         var view = room.View;
         if (view.Status == ConnectionStatus.Ended)
             return new("ended", Error: view.Error);
@@ -140,6 +154,8 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
             ConnectionStatus.Reconnecting => "reconnecting",
             _ => "connecting"
         };
-        return new(status, view.Role, view.Room?.State.RoomId, peer?.Connected, view.Error, activeSwap);
+        string? playbackError = view.Status == ConnectionStatus.Connected &&
+            player?.View is { Kind: ReportKind.Failed } failed ? failed.Detail ?? "player-error" : null;
+        return new(status, view.Role, view.Room?.State.RoomId, peer?.Connected, view.Error, activeSwap, playbackError);
     }
 }
