@@ -13,7 +13,7 @@ docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml up 
 docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml logs --tail 50 edge
 ```
 
-После выпуска сертификата проверьте `https://<адрес>:8443/health` из сети клиентов. В обоих MusicSync укажите `wss://<адрес>:8443/ws`. Оба контейнера запускаются с `restart: unless-stopped`. Активные комнаты хранятся в памяти и создаются заново после перезапуска сервера.
+После выпуска сертификата проверьте `https://<адрес>:8443/health` из сети клиентов. В установщике «Вместе» на каждом ПК укажите `wss://<адрес>:8443/ws`. Оба контейнера запускаются с `restart: unless-stopped`. Активные комнаты хранятся в памяти и создаются заново после перезапуска сервера.
 
 Для остановки проекта выполните `docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml down`. Сохраните Docker-тома при обновлении и повторном запуске.
 

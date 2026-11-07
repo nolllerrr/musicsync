@@ -17,8 +17,6 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private TrackId? expectedTrack;
 
-    public SonataPlayer(int port, Func<long> now) : this(new SonataCdp(port), now) { }
-
     public async Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token)
     {
         try

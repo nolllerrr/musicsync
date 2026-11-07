@@ -1,0 +1,98 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:system="clr-namespace:System;assembly=System.Runtime">
+    <Color x:Key="AccentColor">#FFFF00</Color>
+    <Color x:Key="AccentHoverColor">#DADA0B</Color>
+    <Color x:Key="AccentPressedColor">#FFFF80</Color>
+    <SolidColorBrush x:Key="Accent" Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="AccentHover" Color="{StaticResource AccentHoverColor}"/>
+    <SolidColorBrush x:Key="AccentPressed" Color="{StaticResource AccentPressedColor}"/>
+    <SolidColorBrush x:Key="WindowBackground" Color="#121212"/>
+    <SolidColorBrush x:Key="Surface" Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="Text" Color="#E6E6E6"/>
+    <SolidColorBrush x:Key="Muted" Color="#A0A0A0"/>
+    <SolidColorBrush x:Key="Line" Color="#333333"/>
+    <SolidColorBrush x:Key="ControlBackground" Color="#292929"/>
+    <SolidColorBrush x:Key="ControlHover" Color="#343434"/>
+    <SolidColorBrush x:Key="ControlBorder" Color="#4D4D4D"/>
+
+    <!-- Use the Together palette for Fluent text fields. -->
+    <system:Double x:Key="TextControlThemeMinHeight">36</system:Double>
+    <Thickness x:Key="TextControlThemePadding">8,7</Thickness>
+    <SolidColorBrush x:Key="TextControlBackground" Color="#121212"/>
+    <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="#1A1A1A"/>
+    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="#121212"/>
+    <SolidColorBrush x:Key="TextControlElevationBorderBrush" Color="#4D4D4D"/>
+    <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#808080"/>
+    <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="{StaticResource AccentColor}"/>
+    <SolidColorBrush x:Key="TextControlSelectionHighlightColor" Color="#665A00"/>
+
+    <Style x:Key="ButtonFocus" TargetType="Control">
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Control">
+                    <Border CornerRadius="11" Margin="-3" BorderThickness="1"
+                            BorderBrush="{StaticResource Accent}"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType="Button">
+        <Setter Property="Padding" Value="14,7"/>
+        <Setter Property="MinHeight" Value="36"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Foreground" Value="{StaticResource Text}"/>
+        <Setter Property="Background" Value="{StaticResource ControlBackground}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource ControlBorder}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="FocusVisualStyle" Value="{StaticResource ButtonFocus}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Surface" CornerRadius="8" Padding="{TemplateBinding Padding}"
+                            Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
+                                          RecognizesAccessKey="True"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Surface" Property="Opacity" Value="0.5"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{StaticResource ControlHover}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{StaticResource ControlBorder}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+        <Setter Property="Background" Value="{StaticResource Accent}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="Foreground" Value="Black"/>
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{StaticResource AccentHover}"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Setter Property="Background" Value="{StaticResource AccentPressed}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+    <Style TargetType="Label">
+        <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+    </Style>
+    <Style x:Key="Card" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource Surface}"/>
+        <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="CornerRadius" Value="12"/>
+        <Setter Property="Padding" Value="16"/>
+    </Style>
+</ResourceDictionary>

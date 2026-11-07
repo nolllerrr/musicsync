@@ -1,5 +1,0 @@
-{
-  "server": "ws://127.0.0.1:5050/ws",
-  "allowLan": false,
-  "correctionThresholdMs": 1200
-}

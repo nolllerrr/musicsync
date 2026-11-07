@@ -3,64 +3,26 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="MusicSync" Width="490" SizeToContent="Height" ResizeMode="NoResize"
         WindowStartupLocation="CenterScreen" UseLayoutRounding="True"
-        Background="#F2F5FA" Foreground="#17253A" FontFamily="Segoe UI" FontSize="14">
+        Icon="Assets/Together.ico"
+        Background="{DynamicResource WindowBackground}" Foreground="{DynamicResource Text}"
+        FontFamily="Segoe UI" FontSize="14">
     <Window.Resources>
-        <Style TargetType="Button">
-            <Setter Property="MinHeight" Value="38"/>
-            <Setter Property="Padding" Value="14,6"/>
-            <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#213456"/>
-            <Setter Property="Background" Value="#EDF2FB"/>
-            <Setter Property="BorderBrush" Value="#D8E0ED"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border x:Name="Surface" CornerRadius="7" Padding="{TemplateBinding Padding}"
-                                Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                                BorderThickness="{TemplateBinding BorderThickness}">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Surface" Property="Opacity" Value="0.85"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Surface" Property="Opacity" Value="0.72"/>
-                            </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Surface" Property="BorderBrush" Value="#17253A"/>
-                                <Setter TargetName="Surface" Property="BorderThickness" Value="2"/>
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Surface" Property="Opacity" Value="0.5"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
-        <Style x:Key="Primary" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-            <Setter Property="Background" Value="#3148C7"/>
-            <Setter Property="BorderBrush" Value="#3148C7"/>
-            <Setter Property="Foreground" Value="White"/>
-        </Style>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/YandexDark.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
     </Window.Resources>
+    <Window.ThemeMode>Dark</Window.ThemeMode>
 
     <StackPanel Margin="20">
-        <Border Background="#182745" CornerRadius="12" Padding="16" Margin="0,0,0,12">
+        <Border Style="{StaticResource Card}" Margin="0,0,0,12">
             <DockPanel>
-                <Border DockPanel.Dock="Left" Background="#3148C7" CornerRadius="9" Width="40" Height="40"
-                        VerticalAlignment="Center" Margin="0,0,12,0">
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
-                        <Rectangle Width="4" Height="12" Fill="White" RadiusX="2" RadiusY="2"/>
-                        <Rectangle Width="4" Height="22" Fill="White" RadiusX="2" RadiusY="2" Margin="4,0"/>
-                        <Rectangle Width="4" Height="16" Fill="White" RadiusX="2" RadiusY="2"/>
-                    </StackPanel>
-                </Border>
+                <Image DockPanel.Dock="Left" Source="Assets/Together.png"
+                       Width="40" Height="40" VerticalAlignment="Center" Margin="0,0,12,0"/>
                 <StackPanel>
-                    <TextBlock Text="MusicSync" FontSize="24" FontWeight="SemiBold" Foreground="White"/>
-                    <TextBlock Text="Раздел «Вместе» в Яндекс Музыке" Foreground="#D0DBF5"/>
+                    <TextBlock Text="MusicSync" FontSize="24" FontWeight="SemiBold"/>
+                    <TextBlock Text="Раздел «Вместе» в Яндекс Музыке" Foreground="{StaticResource Muted}"/>
                 </StackPanel>
             </DockPanel>
         </Border>
@@ -76,22 +38,21 @@
                 <Button Grid.Column="2" Content="Удалить патч" Click="Uninstall_Click"/>
             </Grid>
 
-            <Border Background="White" BorderBrush="#D8E0ED" BorderThickness="1" CornerRadius="12" Padding="14">
+            <Border Style="{StaticResource Card}" Padding="14">
                 <StackPanel>
                     <TextBlock Text="Настройки подключения" FontSize="16" FontWeight="SemiBold"/>
                     <Label x:Name="EndpointLabel" Content="Адрес сервера WebSocket" Target="{Binding ElementName=Endpoint}"
-                           Padding="0,8,0,5" Foreground="#53647B"/>
+                           Padding="0,8,0,5"/>
                     <DockPanel>
                         <Button DockPanel.Dock="Right" Content="Сохранить" Click="Save_Click" Margin="8,0,0,0"/>
-                        <TextBox x:Name="Endpoint" Padding="9,5" VerticalContentAlignment="Center" MaxLength="2048"
-                                 BorderBrush="#A4B3CA" SpellCheck.IsEnabled="False"
+                        <TextBox x:Name="Endpoint" MaxLength="2048" SpellCheck.IsEnabled="False"
                                  AutomationProperties.LabeledBy="{Binding ElementName=EndpointLabel}"/>
                     </DockPanel>
                 </StackPanel>
             </Border>
         </StackPanel>
 
-        <TextBlock x:Name="Notice" TextWrapping="Wrap" Margin="2,10,2,0" Foreground="#53647B"
+        <TextBlock x:Name="Notice" TextWrapping="Wrap" Margin="2,10,2,0" Foreground="{StaticResource Muted}"
                    AutomationProperties.LiveSetting="Polite"
                    Text="Если Яндекс Музыка открыта, MusicSync перезапустит её после установки или удаления патча."/>
     </StackPanel>

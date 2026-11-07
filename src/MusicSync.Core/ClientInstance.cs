@@ -2,6 +2,6 @@ namespace MusicSync.Core;
 
 public static class ClientInstance
 {
-    // Retain the original tray client's mutex name to also exclude an unpatched 0.1.9 client.
+    // Keep the mutex name stable across versions so only one session can control playback.
     public const string MutexName = @"Local\MusicSync.Tray";
 }
