@@ -1,0 +1,76 @@
+name: musicsync
+services:
+  server:
+    image: musicsync-server:${MUSICSYNC_IMAGE_TAG:-0.1.6}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      Sync__Mode: Lan
+      Sync__LanIp: 172.30.53.2
+      Sync__Port: "5050"
+      DOTNET_EnableDiagnostics: "0"
+    networks:
+      backend:
+        ipv4_address: 172.30.53.2
+    cpus: 0.45
+    mem_limit: 192m
+    pids_limit: 96
+    logging: &rotating_logs
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  edge:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    depends_on: [server]
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      MUSICSYNC_HOST: ${MUSICSYNC_HOST:?Set MUSICSYNC_HOST to the public IPv4 or DNS name}
+      MUSICSYNC_ACME_CA: ${MUSICSYNC_ACME_CA:-https://acme-v02.api.letsencrypt.org/directory}
+      GOMEMLIMIT: 64MiB
+    ports:
+      - "${MUSICSYNC_BIND_IP:-127.0.0.1}:80:80"
+      - "${MUSICSYNC_BIND_IP:-127.0.0.1}:8443:8443"
+    volumes:
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+        bind:
+          create_host_path: false
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      default: {}
+      backend:
+        ipv4_address: 172.30.53.3
+    cpus: 0.25
+    mem_limit: 128m
+    pids_limit: 64
+    logging: *rotating_logs
+
+networks:
+  backend:
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.30.53.0/29
+
+volumes:
+  caddy_data:
+  caddy_config:

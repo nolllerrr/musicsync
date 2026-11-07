@@ -1,0 +1,28 @@
+# Visual Studio user files
+.vs/
+*.suo
+*.user
+
+# Build and test output
+bin/
+obj/
+TestResults/
+dist/
+*.trx
+*.log
+
+# Local environment files and TLS keys
+*.env
+*.env.*
+!*.env.example
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Network diagnostics for local machines and VPS
+/musicsync-diagnostics/network-results.txt
+/musicsync-diagnostics/REPORT.md
+
+# Local project history
+/.local-history/

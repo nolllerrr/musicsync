@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net10.0-windows10.0.19041.0</TargetFramework></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="FlaUI.UIA3" Version="[5.0.0]" />
+    <ProjectReference Include="../MusicSync.Core/MusicSync.Core.csproj" />
+    <InternalsVisibleTo Include="musicsync" />
+  </ItemGroup>
+</Project>

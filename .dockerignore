@@ -1,0 +1,13 @@
+**
+!Directory.Build.props
+!src
+src/*
+!src/MusicSync.Core
+!src/MusicSync.Server
+!src/MusicSync.Core/**
+!src/MusicSync.Server/**
+src/*/bin
+src/*/obj
+!deploy
+deploy/*
+!deploy/Dockerfile

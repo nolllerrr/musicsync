@@ -1,0 +1,26 @@
+{
+	admin off
+	auto_https disable_redirects
+	default_sni {$MUSICSYNC_HOST}
+}
+
+http://{$MUSICSYNC_HOST} {
+	respond 404
+}
+
+https://{$MUSICSYNC_HOST}:8443 {
+	tls {
+		issuer acme {$MUSICSYNC_ACME_CA} {
+			profile shortlived
+			disable_tlsalpn_challenge
+		}
+	}
+
+	@musicsync path /health /ws
+	handle @musicsync {
+		reverse_proxy server:5050
+	}
+	handle {
+		respond 404
+	}
+}

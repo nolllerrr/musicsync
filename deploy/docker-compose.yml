@@ -1,0 +1,41 @@
+name: musicsync
+services:
+  server:
+    image: musicsync-server:${MUSICSYNC_IMAGE_TAG:-0.1.0}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "${MUSICSYNC_BIND_IP:-127.0.0.1}:${MUSICSYNC_PORT:-8443}:8443"
+    volumes:
+      - type: bind
+        source: ${MUSICSYNC_PFX_FILE:?Set MUSICSYNC_PFX_FILE to an absolute path}
+        target: /certs/musicsync.pfx
+        read_only: true
+        bind:
+          create_host_path: false
+    environment:
+      Sync__Mode: Tls
+      Sync__Port: "8443"
+      Sync__TlsPfxPath: /certs/musicsync.pfx
+      Sync__TlsPfxPassword: ${MUSICSYNC_PFX_PASSWORD:?Set MUSICSYNC_PFX_PASSWORD}
+      Sync__MaxConnections: "32"
+      Sync__MaxRooms: "16"
+      Sync__GraceSeconds: "90"
+      DOTNET_EnableDiagnostics: "0"
+    cpus: 0.45
+    mem_limit: 192m
+    pids_limit: 96
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

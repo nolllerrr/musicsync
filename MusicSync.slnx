@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/local-control-poc/">
+    <Project Path="local-control-poc/MusicSync.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/MusicSync.Client/MusicSync.Client.csproj" />
+    <Project Path="src/MusicSync.Core/MusicSync.Core.csproj" />
+    <Project Path="src/MusicSync.Server/MusicSync.Server.csproj" />
+    <Project Path="src/MusicSync.Yandex/MusicSync.Yandex.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MusicSync.Tests/MusicSync.Tests.csproj" />
+  </Folder>
+</Solution>
