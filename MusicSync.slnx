@@ -1,8 +1,12 @@
 <Solution>
+  <Folder Name="/integration/">
+    <Project Path="integration/installer/MusicSync.Patch.csproj" />
+  </Folder>
   <Folder Name="/local-control-poc/">
     <Project Path="local-control-poc/MusicSync.csproj" />
   </Folder>
   <Folder Name="/src/">
+    <Project Path="src/MusicSync.Agent/MusicSync.Agent.csproj" />
     <Project Path="src/MusicSync.Client/MusicSync.Client.csproj" />
     <Project Path="src/MusicSync.Core/MusicSync.Core.csproj" />
     <Project Path="src/MusicSync.Server/MusicSync.Server.csproj" />

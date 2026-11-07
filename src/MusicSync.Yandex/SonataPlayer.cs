@@ -4,14 +4,20 @@ using MusicSync.Core;
 
 namespace MusicSync.Yandex;
 
-public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
+public interface ISonataTransport
+{
+    Task<JsonElement> EvaluateAsync(string expression, CancellationToken token);
+}
+
+public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : IPlayer
 {
     private sealed record Sample(bool Running, string? Status, string? TrackId, string? AlbumId,
         long? PositionMs, long? DurationMs, string? Title, string? Artist, string? Album, string? Error);
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private readonly SonataCdp cdp = new(port);
     private TrackId? expectedTrack;
+
+    public SonataPlayer(int port, Func<long> now) : this(new SonataCdp(port), now) { }
 
     public async Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token)
     {
@@ -59,10 +65,12 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
                 queueParams: {entityId: expected.trackId, index: 0, shuffle: false}
             };
             const previousContext = core.getState().currentContext?.value?.data;
+            if (!canMutate()) return {error: 'sonata-command-failed'};
             if (active() && previousContext?.type === 'album' && idText(previousContext.meta?.id) === expected.albumId) {
                 // playContext reuses the old queue for the same album. Rebuild and verify the selection first.
                 await core.setContext(request);
                 if (!sameTrack(queuedTrack(), expected)) return {error: 'track-unconfirmed'};
+                if (!canMutate()) return {error: 'sonata-command-failed'};
                 await active().play();
             } else {
                 await core.playContext(request);
@@ -87,7 +95,10 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
             const before = read();
             if (expected && !sameTrack(before, expected)) return {error: 'track-unconfirmed'};
             if (!active()) return {error: 'no-session'};
-            if (before.status !== '{{status}}') await active().{{method}}();
+            if (before.status !== '{{status}}') {
+                if (!canMutate()) return {error: 'sonata-command-failed'};
+                await active().{{method}}();
+            }
             return confirm(sample => (!expected || sameTrack(sample, expected)) && sample.status === '{{status}}',
                 'command-unconfirmed');
             """, token);
@@ -102,6 +113,7 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
             const before = read();
             if (!sameTrack(before, expected)) return {error: 'track-unconfirmed'};
             const position = Math.min({{position}}, before.durationMs - 1);
+            if (!canMutate()) return {error: 'sonata-command-failed'};
             await active().setProgress(position / 1000);
             return confirm(sample => sameTrack(sample, expected) && Math.abs(sample.positionMs - position) <= 250,
                 'position-unconfirmed');
@@ -116,7 +128,7 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
 
     private async Task<PlayerReading> ReadAsync(string body, CancellationToken token)
     {
-        var result = await cdp.EvaluateAsync("(async () => {\n" + Prelude + "\n" + body + "\n})()", token)
+        var result = await transport.EvaluateAsync("(async () => {\n" + Prelude + "\n" + body + "\n})()", token)
             .ConfigureAwait(false);
         long sampledAt = now();
         Sample? sample;
@@ -144,6 +156,8 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
     // Sonata is in the page's React tree. Every evaluation resolves the current provider again,
     // so a reload or an app restart cannot leave a stale controller in MusicSync.
     private const string Prelude = """
+        const canMutate = () => typeof isMusicSyncEvaluationCurrent !== 'function' || isMusicSyncEvaluationCurrent();
+
         function findCore() {
             const roots = new Set();
             const elements = [document.getElementById('__next'), document.getElementById('root'), document.body];

@@ -6,7 +6,7 @@ using MusicSync.Core;
 
 namespace MusicSync.Yandex;
 
-internal sealed class SonataCdp(int port)
+internal sealed class SonataCdp(int port) : ISonataTransport
 {
     private const int MaxResponseBytes = 64 * 1024;
     private static readonly HttpClient LocalHttp = new(new SocketsHttpHandler

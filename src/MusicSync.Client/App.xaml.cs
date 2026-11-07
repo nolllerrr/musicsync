@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Windows;
+using MusicSync.Core;
 
 namespace MusicSync.Client;
 
@@ -33,7 +34,7 @@ public partial class App : Application
             sonataPort = port;
         }
 
-        instance = new Mutex(true, @"Local\MusicSync.Tray", out bool first);
+        instance = new Mutex(true, ClientInstance.MutexName, out bool first);
         if (!first)
         {
             instance.Dispose();
