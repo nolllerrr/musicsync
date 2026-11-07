@@ -4,14 +4,20 @@ using MusicSync.Core;
 
 namespace MusicSync.Yandex;
 
-public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
+public interface ISonataTransport
+{
+    Task<JsonElement> EvaluateAsync(string expression, CancellationToken token);
+}
+
+public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : IPlayer
 {
     private sealed record Sample(bool Running, string? Status, string? TrackId, string? AlbumId,
         long? PositionMs, long? DurationMs, string? Title, string? Artist, string? Album, string? Error);
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-    private readonly SonataCdp cdp = new(port);
     private TrackId? expectedTrack;
+
+    public SonataPlayer(int port, Func<long> now) : this(new SonataCdp(port), now) { }
 
     public async Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token)
     {
@@ -116,7 +122,7 @@ public sealed class SonataPlayer(int port, Func<long> now) : IPlayer
 
     private async Task<PlayerReading> ReadAsync(string body, CancellationToken token)
     {
-        var result = await cdp.EvaluateAsync("(async () => {\n" + Prelude + "\n" + body + "\n})()", token)
+        var result = await transport.EvaluateAsync("(async () => {\n" + Prelude + "\n" + body + "\n})()", token)
             .ConfigureAwait(false);
         long sampledAt = now();
         Sample? sample;
