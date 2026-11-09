@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.WebSockets;
 using System.Text.Json;
+using Microsoft.AspNetCore.HttpOverrides;
 using MusicSync.Core;
 using MusicSync.Server;
 
@@ -18,12 +19,25 @@ namespace MusicSync.Server
             int port = builder.Configuration.GetValue("Sync:Port", mode == "Tls" ? 8443 : 5050);
             int maxConnections = builder.Configuration.GetValue("Sync:MaxConnections", 32);
             int maxRooms = builder.Configuration.GetValue("Sync:MaxRooms", 16);
+            int maxRoomsPerSource = builder.Configuration.GetValue("Sync:MaxRoomsPerSource", 4);
+            int maxRoomCreationsPerSource = builder.Configuration.GetValue("Sync:MaxRoomCreationsPerSource", 8);
+            int roomCreationWindowSeconds = builder.Configuration.GetValue("Sync:RoomCreationWindowSeconds", 60);
             int graceSeconds = builder.Configuration.GetValue("Sync:GraceSeconds", 90);
             if (port is < 0 or > 65535 || maxConnections is < 2 or > 256 ||
-                maxRooms is < 1 or > 128 || graceSeconds is < 5 or > 600)
+                maxRooms is < 1 or > 128 || maxRoomsPerSource is < 1 or > 128 ||
+                maxRoomCreationsPerSource is < 1 or > 128 || roomCreationWindowSeconds is < 1 or > 3600 ||
+                graceSeconds is < 5 or > 600)
                 throw new InvalidOperationException("Invalid MusicSync limits or port.");
+            string? trustedProxySetting = builder.Configuration["Sync:TrustedProxy"];
+            IPAddress? trustedProxy = null;
+            if (!string.IsNullOrEmpty(trustedProxySetting) && !IPAddress.TryParse(trustedProxySetting, out trustedProxy))
+                throw new InvalidOperationException("Sync:TrustedProxy must be a proxy IP address.");
+
+            // Keep framework-wide forwarding switches from changing the peer IP before the access check.
+            builder.Services.PostConfigure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.None);
             var clock = new MonotonicClock();
-            var rooms = new RoomRegistry(clock, maxRooms, TimeSpan.FromSeconds(graceSeconds));
+            var rooms = new RoomRegistry(clock, maxRooms, maxRoomsPerSource, maxRoomCreationsPerSource,
+                TimeSpan.FromSeconds(roomCreationWindowSeconds), TimeSpan.FromSeconds(graceSeconds));
             var slots = new SemaphoreSlim(maxConnections);
 
             builder.WebHost.ConfigureKestrel(kestrel =>
@@ -68,6 +82,19 @@ namespace MusicSync.Server
                 }
                 await next(context);
             });
+            if (trustedProxy is not null)
+            {
+                var forwarding = new ForwardedHeadersOptions
+                {
+                    ForwardedHeaders = ForwardedHeaders.XForwardedFor,
+                    ForwardLimit = 1
+                };
+                forwarding.KnownIPNetworks.Clear();
+                forwarding.KnownProxies.Clear();
+                forwarding.KnownProxies.Add(trustedProxy.IsIPv4MappedToIPv6 ? trustedProxy.MapToIPv4() : trustedProxy);
+                app.UseWhen(context => context.Connection.RemoteIpAddress is not null,
+                    branch => branch.UseForwardedHeaders(forwarding));
+            }
             app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(15) });
             app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = Protocol.Version, mode }));
             app.Map("/ws", async context =>
@@ -91,8 +118,11 @@ namespace MusicSync.Server
                 {
                     string? subProtocol = context.WebSockets.WebSocketRequestedProtocols.Contains(Protocol.RoleSwapSubProtocol)
                         ? Protocol.RoleSwapSubProtocol : null;
+                    var source = context.Connection.RemoteIpAddress ?? IPAddress.None;
+                    if (source.IsIPv4MappedToIPv6)
+                        source = source.MapToIPv4();
                     using var socket = await context.WebSockets.AcceptWebSocketAsync(subProtocol);
-                    await ServeAsync(socket, rooms, clock, app.Logger, context.RequestAborted, app.Lifetime.ApplicationStopping);
+                    await ServeAsync(socket, source, rooms, clock, app.Logger, context.RequestAborted, app.Lifetime.ApplicationStopping);
                 }
                 finally { slots.Release(); }
             });
@@ -101,7 +131,7 @@ namespace MusicSync.Server
             return app;
         }
 
-        private static async Task ServeAsync(WebSocket socket, RoomRegistry rooms, MonotonicClock clock,
+        private static async Task ServeAsync(WebSocket socket, IPAddress source, RoomRegistry rooms, MonotonicClock clock,
             ILogger logger, CancellationToken request, CancellationToken stopping)
         {
             using var peer = new RoomPeer(socket.SubProtocol == Protocol.RoleSwapSubProtocol);
@@ -113,7 +143,7 @@ namespace MusicSync.Server
                 var hello = await Wire.ReceiveAsync<ClientMessage>(socket, TimeSpan.FromSeconds(6), token);
                 if (hello is null)
                     return;
-                var rejection = rooms.Enter(peer, hello);
+                var rejection = rooms.Enter(peer, hello, source);
                 if (rejection is not null)
                 {
                     peer.Send(rejection);
