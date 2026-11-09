@@ -21,11 +21,11 @@
   max-height: calc(100vh - 16px);
   overflow: auto;
   padding: 16px;
-  border: 1px solid var(--ym-controls-color-secondary-outline-enabled_stroke, #7776);
-  border-radius: 16px;
-  background: var(--ym-background-color-primary-enabled-popover, Canvas);
+  border-radius: var(--ym-radius-size-xl, 16px);
+  background: var(--ym-background-color-primary-enabled-menu, var(--ym-background-color-primary-enabled-popover, Canvas));
+  backdrop-filter: blur(.875rem);
   color: var(--ym-controls-color-primary-text-enabled_variant, CanvasText);
-  box-shadow: 0 12px 32px #0004;
+  box-shadow: 0 .0625rem 1.25rem var(--ym-shadow-menu, #0004);
   font: inherit;
   font-size: 14px;
   line-height: 1.4;

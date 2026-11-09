@@ -1,3 +1,4 @@
+using System.Net;
 using System.Threading.Channels;
 using MusicSync.Core;
 
@@ -29,7 +30,8 @@ internal sealed class RoomPeer(bool supportsRoleSwap) : IDisposable
     public void Dispose() => disconnect.Dispose();
 }
 
-internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, TimeSpan grace)
+internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRoomsPerSource,
+    int maxRoomCreationsPerSource, TimeSpan creationWindow, TimeSpan grace)
 {
     private sealed class Seat(string token)
     {
@@ -40,8 +42,9 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, TimeSpan 
         public Participant Status => new(Peer is not null, Report);
     }
 
-    private sealed class Room(string id, Seat leader, long now)
+    private sealed class Room(string id, Seat leader, IPAddress creator, long now)
     {
+        public IPAddress Creator { get; } = creator;
         public RoomState State { get; set; } = new(id, 0, 0, null, Playback.Paused, 0, now, false);
         public Seat Leader { get; set; } = leader;
         public Seat? Listener { get; set; }
@@ -66,8 +69,10 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, TimeSpan 
     private readonly object gate = new();
     private readonly Dictionary<string, Room> rooms = new();
     private readonly Dictionary<string, (Room Room, Role Role)> tokens = new();
+    private readonly Queue<(IPAddress Source, long CreatedAt)> recentCreations = new();
+    private readonly Dictionary<IPAddress, int> creationCounts = new();
 
-    public ServerMessage? Enter(RoomPeer peer, ClientMessage hello)
+    public ServerMessage? Enter(RoomPeer peer, ClientMessage hello, IPAddress source)
     {
         if (hello.Version != Protocol.Version)
             return Error("protocol-version");
@@ -93,12 +98,19 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, TimeSpan 
             {
                 if (rooms.Count >= maxRooms)
                     return Error("server-full");
+                int creations = creationCounts.GetValueOrDefault(source);
+                if (creations >= maxRoomCreationsPerSource ||
+                    rooms.Values.Count(room => room.Creator.Equals(source)) >= maxRoomsPerSource)
+                    return Error("room-creation-limited");
                 string code;
                 do { code = Protocol.NewCode(); } while (rooms.ContainsKey(code));
                 role = Role.Leader;
-                room = new Room(code, new Seat(hello.Token!), clock.Now);
+                long now = clock.Now;
+                room = new Room(code, new Seat(hello.Token!), source, now);
                 rooms.Add(code, room);
                 tokens.Add(hello.Token!, (room, role));
+                recentCreations.Enqueue((source, now));
+                creationCounts[source] = creations + 1;
             }
             else
             {
@@ -273,6 +285,12 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, TimeSpan 
     private void PruneLocked()
     {
         long now = clock.Now;
+        while (recentCreations.TryPeek(out var creation) && now - creation.CreatedAt >= creationWindow.TotalMilliseconds)
+        {
+            recentCreations.Dequeue();
+            if (--creationCounts[creation.Source] == 0)
+                creationCounts.Remove(creation.Source);
+        }
         foreach (var room in rooms.Values.ToArray())
         {
             if (room.Leader.Peer is null && room.Leader.Expires <= now)

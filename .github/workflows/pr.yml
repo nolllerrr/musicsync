@@ -1,0 +1,66 @@
+name: PR checks
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  dotnet:
+    name: Build and test solution
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet restore MusicSync.slnx
+      - run: dotnet build MusicSync.slnx -c Release --no-restore
+      - run: dotnet test MusicSync.slnx -c Release --no-build
+
+  publish-together:
+    name: Publish Together installer
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Publish and verify the standalone EXE
+        shell: pwsh
+        run: |
+          ./scripts/Publish-Together.ps1
+          $version = dotnet msbuild integration/installer/MusicSync.Patch.csproj -nologo -getProperty:Version
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^\d+\.\d+\.\d+$') {
+            throw 'Could not read the installer version from MSBuild.'
+          }
+
+          $path = "dist/MusicSync-Together-$version-Windows-x64.exe"
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+              (Get-Item -LiteralPath $path).Length -le 0) {
+            throw "Missing or empty installer: $path"
+          }
+
+  javascript:
+    name: Check and test JavaScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Run node --check
+        shell: bash
+        run: |
+          git ls-files -z -- '*.js' '*.cjs' | while IFS= read -r -d '' file; do
+            node --check -- "$file"
+          done
+      - name: Run Sonata tests
+        run: node --test tests/MusicSync.Tests/SonataPlayer.test.cjs

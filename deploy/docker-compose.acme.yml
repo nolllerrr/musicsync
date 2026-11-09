@@ -1,7 +1,7 @@
 name: musicsync
 services:
   server:
-    image: musicsync-server:${MUSICSYNC_IMAGE_TAG:-0.1.6}
+    image: "musicsync-server:${MUSICSYNC_IMAGE_TAG:?Set MUSICSYNC_IMAGE_TAG to the server image tag}"
     build:
       context: ..
       dockerfile: deploy/Dockerfile
@@ -17,6 +17,10 @@ services:
       Sync__Mode: Lan
       Sync__LanIp: 172.30.53.2
       Sync__Port: "5050"
+      Sync__TrustedProxy: 172.30.53.3
+      Sync__MaxRoomsPerSource: "${MUSICSYNC_MAX_ROOMS_PER_SOURCE:-4}"
+      Sync__MaxRoomCreationsPerSource: "${MUSICSYNC_MAX_ROOM_CREATIONS_PER_SOURCE:-8}"
+      Sync__RoomCreationWindowSeconds: "${MUSICSYNC_ROOM_CREATION_WINDOW_SECONDS:-60}"
       DOTNET_EnableDiagnostics: "0"
     networks:
       backend:

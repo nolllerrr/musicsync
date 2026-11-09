@@ -110,7 +110,7 @@ public sealed class ServerTests
     [TestMethod]
     public async Task ReusesMembershipAfterLostHandshakeAndExplicitLeaveEndsRoom()
     {
-        await using var server = await LocalServer.StartAsync();
+        await using var server = await LocalServer.StartAsync("--Sync:MaxRoomsPerSource=1", "--Sync:MaxRoomCreationsPerSource=1");
         using var first = await Peer.OpenAsync(server.Uri, "create");
         string room = (await first.NextAsync("welcome")).Room!.State.RoomId;
         using var leader = await Peer.OpenAsync(server.Uri, "create", token: first.Token);
@@ -149,17 +149,21 @@ public sealed class ServerTests
     [TestMethod]
     public async Task GraceExpiryRemovesRoomAndNotifiesListener()
     {
-        await using var server = await LocalServer.StartAsync("--Sync:GraceSeconds=5");
+        await using var server = await LocalServer.StartAsync("--Sync:GraceSeconds=5", "--Sync:MaxRoomsPerSource=1");
         using var leader = await Peer.OpenAsync(server.Uri, "create");
         string room = (await leader.NextAsync("welcome")).Room!.State.RoomId;
         await using var listener = new RoomConnection(server.Uri, room);
         await Check.EventuallyAsync(() => listener.View.Status == ConnectionStatus.Connected);
         leader.Abort();
         await Check.EventuallyAsync(() => listener.View.Room?.Leader.Connected == false);
+        using var duringGrace = await Peer.OpenAsync(server.Uri, "create");
+        Assert.AreEqual("room-creation-limited", (await duringGrace.NextAsync("error")).Error);
         await Check.EventuallyAsync(() => listener.View.Status == ConnectionStatus.Ended, seconds: 13);
         Assert.AreEqual("leader-timeout", listener.View.Error);
         using var expired = await Peer.OpenAsync(server.Uri, "resume", room, token: leader.Token);
         Assert.AreEqual("room-unavailable", (await expired.NextAsync("error")).Error);
+        using var replacement = await Peer.OpenAsync(server.Uri, "create");
+        await replacement.NextAsync("welcome");
     }
 
     [TestMethod]
@@ -234,7 +238,7 @@ public sealed class ServerTests
     [TestMethod]
     public async Task StaleReportsAreDroppedAndRoomLimitIsEnforced()
     {
-        await using var server = await LocalServer.StartAsync("--Sync:MaxRooms=1");
+        await using var server = await LocalServer.StartAsync("--Sync:MaxRooms=1", "--Sync:MaxRoomsPerSource=1");
         using var leader = await Peer.OpenAsync(server.Uri, "create");
         await leader.NextAsync("welcome");
         using var other = await Peer.OpenAsync(server.Uri, "create");
@@ -245,6 +249,72 @@ public sealed class ServerTests
         var snapshot = await leader.NextAsync("snapshot");
         Assert.AreEqual(1L, snapshot.Room!.Leader.Report!.Revision);
         Assert.AreEqual(ReportKind.Applying, snapshot.Room.Leader.Report.Kind);
+    }
+
+    [TestMethod]
+    public async Task ParallelCreatesShareSourceQuotaAndLeavingFreesIt()
+    {
+        const string source = "198.51.100.20";
+        const string otherSource = "203.0.113.20";
+        await using var server = await LocalServer.StartAsync("--Sync:TrustedProxy=127.0.0.1", "--Sync:MaxRoomsPerSource=2");
+        var peers = await Task.WhenAll(Enumerable.Range(0, 6)
+            .Select(_ => Peer.OpenAsync(server.Uri, "create", forwardedFor: source)));
+        try
+        {
+            var replies = await Task.WhenAll(peers.Select(peer => peer.NextAsync()));
+            Assert.HasCount(2, replies.Where(reply => reply.Type == "welcome"));
+            Assert.HasCount(4, replies.Where(reply => reply is { Type: "error", Error: "room-creation-limited" }));
+
+            int index = Array.FindIndex(replies, reply => reply.Type == "welcome");
+            string room = replies[index].Room!.State.RoomId;
+            using var resumed = await Peer.OpenAsync(server.Uri, "resume", room, peers[index].Token, forwardedFor: otherSource);
+            await resumed.NextAsync("welcome");
+            using var stillLimited = await Peer.OpenAsync(server.Uri, "create", forwardedFor: source);
+            Assert.AreEqual("room-creation-limited", (await stillLimited.NextAsync("error")).Error);
+
+            using var other = await Peer.OpenAsync(server.Uri, "create", forwardedFor: otherSource);
+            await other.NextAsync("welcome");
+            await resumed.SendAsync(new(Protocol.Version, "leave", Id: Guid.NewGuid()));
+            await resumed.NextAsync("result");
+            using var replacement = await Peer.OpenAsync(server.Uri, "create", forwardedFor: source);
+            await replacement.NextAsync("welcome");
+        }
+        finally
+        {
+            foreach (var peer in peers)
+                peer.Dispose();
+        }
+    }
+
+    [TestMethod]
+    public async Task CreationRateLimitSurvivesLeavingAndIsReportedByClient()
+    {
+        await using var server = await LocalServer.StartAsync("--Sync:MaxRoomCreationsPerSource=1",
+            "--Sync:RoomCreationWindowSeconds=5");
+        using var leader = await Peer.OpenAsync(server.Uri, "create");
+        await leader.NextAsync("welcome");
+        await leader.SendAsync(new(Protocol.Version, "leave", Id: Guid.NewGuid()));
+        await leader.NextAsync("result");
+
+        await using var limited = new RoomConnection(server.Uri, null);
+        await Check.EventuallyAsync(() => limited.View.Status == ConnectionStatus.Ended);
+        Assert.AreEqual("room-creation-limited", limited.View.Error);
+
+        await Task.Delay(TimeSpan.FromSeconds(5));
+        using var replacement = await Peer.OpenAsync(server.Uri, "create");
+        await replacement.NextAsync("welcome");
+    }
+
+    [TestMethod]
+    [DataRow("")]
+    [DataRow("127.0.0.2")]
+    public async Task UntrustedForwardedForCannotChangeSourceQuota(string trustedProxy)
+    {
+        await using var server = await LocalServer.StartAsync($"--Sync:TrustedProxy={trustedProxy}", "--Sync:MaxRoomsPerSource=1");
+        using var first = await Peer.OpenAsync(server.Uri, "create", forwardedFor: "198.51.100.20");
+        await first.NextAsync("welcome");
+        using var spoofed = await Peer.OpenAsync(server.Uri, "create", forwardedFor: "203.0.113.20");
+        Assert.AreEqual("room-creation-limited", (await spoofed.NextAsync("error")).Error);
     }
 
     [TestMethod]
@@ -296,11 +366,13 @@ internal sealed class Peer : IDisposable
     public string Token { get; }
 
     public static async Task<Peer> OpenAsync(Uri uri, string kind, string? room = null, string? token = null,
-        int version = Protocol.Version, bool roleSwap = false)
+        int version = Protocol.Version, bool roleSwap = false, string? forwardedFor = null)
     {
         var peer = new Peer(token ?? Protocol.NewToken());
         if (roleSwap)
             peer.socket.Options.AddSubProtocol(Protocol.RoleSwapSubProtocol);
+        if (forwardedFor is not null)
+            peer.socket.Options.SetRequestHeader("X-Forwarded-For", forwardedFor);
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
         await peer.socket.ConnectAsync(uri, timeout.Token);
         await peer.SendAsync(new(version, kind, Token: peer.Token, RoomId: room));
@@ -327,14 +399,14 @@ internal sealed class Peer : IDisposable
     public async Task<RoomView> SnapshotAsync(Func<RoomView, bool> filter) =>
         (await NextAsync("snapshot", message => filter(message.Room!))).Room!;
 
-    public async Task<ServerMessage> NextAsync(string type, Func<ServerMessage, bool>? filter = null)
+    public async Task<ServerMessage> NextAsync(string? type = null, Func<ServerMessage, bool>? filter = null)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         while (await messages.Reader.WaitToReadAsync(timeout.Token))
             while (messages.Reader.TryRead(out var message))
-                if (message.Type == type && (filter?.Invoke(message) ?? true))
+                if ((type is null || message.Type == type) && (filter?.Invoke(message) ?? true))
                     return message;
-        throw new InvalidOperationException($"Socket closed before {type}.");
+        throw new InvalidOperationException($"Socket closed before {type ?? "the next message"}.");
     }
 
     public void Abort() => socket.Abort();

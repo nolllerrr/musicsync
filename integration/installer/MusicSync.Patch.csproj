@@ -7,6 +7,7 @@
     <ApplicationIcon>Assets/Together.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="MusicSync.Patch.Tests" />
     <Resource Include="$(ApplicationIcon);Assets/Together.png" />
     <PackageReference Include="System.Management" Version="10.0.14" />
     <ProjectReference Include="../../src/MusicSync.Agent/MusicSync.Agent.csproj" />
