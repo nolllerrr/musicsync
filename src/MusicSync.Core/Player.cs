@@ -11,7 +11,7 @@ public sealed record PlayerReading(bool Running, string Title = "", string Artis
 
 public interface IPlayer
 {
-    Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token);
+    Task<PlayerReading> ObserveAsync(CancellationToken token);
     Task<PlayerReading> LoadAsync(TrackId track, CancellationToken token);
     Task<PlayerReading> SetPlaybackAsync(Playback playback, CancellationToken token);
     Task<PlayerReading> PauseForHandoffAsync(CancellationToken token);

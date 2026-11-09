@@ -17,7 +17,7 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
     private TrackId? expectedTrack;
 
-    public async Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token)
+    public async Task<PlayerReading> ObserveAsync(CancellationToken token)
     {
         try
         {
@@ -197,10 +197,28 @@ public sealed class SonataPlayer(ISonataTransport transport, Func<long> now) : I
             const meta = entry?.entity?.data?.meta;
             const parts = /^([1-9][0-9]{0,18})(?::([1-9][0-9]{0,18}))?$/.exec(idText(meta?.id));
             if (!parts) return {};
+            const trackId = parts[1];
+            const validId = /^[1-9][0-9]{0,18}$/;
             const context = entry.context?.data;
-            const album = [context?.type === 'album' ? context.meta?.id : null, meta.albumId, parts[2], meta.albums?.[0]?.id]
-                .map(idText).find(id => /^[1-9][0-9]{0,18}$/.test(id));
-            return {trackId: parts[1], albumId: album};
+            const contextAlbum = idText(context?.type === 'album' ? context.meta?.id : null);
+            // An album queue identifies the selected release even when the track appears on other releases.
+            if (validId.test(contextAlbum)) return {trackId, albumId: contextAlbum};
+
+            const entityAlbum = idText(meta.albumId);
+            const idAlbum = parts[2];
+            if (validId.test(entityAlbum)) {
+                if (idAlbum && idAlbum !== entityAlbum) return {trackId};
+                return {trackId, albumId: entityAlbum};
+            }
+            if (idAlbum) return {trackId, albumId: idAlbum};
+
+            const albums = meta.albums;
+            if (Array.isArray(albums)) {
+                const albumId = idText(albums[0]?.id);
+                if (validId.test(albumId) && albums.every(album => idText(album?.id) === albumId))
+                    return {trackId, albumId};
+            }
+            return {trackId};
         }
 
         const queuedTrack = () => track(core.getState().queueState?.currentEntity?.value);

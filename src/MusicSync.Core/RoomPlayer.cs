@@ -53,7 +53,7 @@ public sealed class RoomPlayer : IAsyncDisposable
             var reading = View.Reading;
             try
             {
-                var observed = await player.ObserveAsync(false, token);
+                var observed = await player.ObserveAsync(token);
                 view = view with { Reading = observed };
                 bool playerReturned = observed.Running && !reading.Running;
                 reading = observed;
@@ -140,7 +140,8 @@ public sealed class RoomPlayer : IAsyncDisposable
                             if (reading.Track is null)
                             {
                                 nextProbe = now + 3000;
-                                reading = await player.ObserveAsync(true, token);
+                                // The queue and live media may have caught up since the initial observation.
+                                reading = await player.ObserveAsync(token);
                                 view = view with { Reading = reading };
                             }
                             if (reading.Ready && Current())

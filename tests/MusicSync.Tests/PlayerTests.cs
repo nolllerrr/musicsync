@@ -59,7 +59,7 @@ public sealed class PlayerTests
         mock.Manual(First, 32_000, Playback.Playing);
         var state = new RoomState("ROOM", 2, 1, First, Playback.Playing, 30_000, time, false);
         var apply = new PlaybackApplier(mock, () => time, 1200);
-        var reading = await mock.ObserveAsync(true, default);
+        var reading = await mock.ObserveAsync(default);
         Assert.IsFalse(apply.NeedsCorrection(state, reading, time, time - 7999));
         Assert.IsFalse(apply.NeedsCorrection(state, reading with { PositionMs = 31_000 }, time, 0));
         Assert.IsTrue(apply.NeedsCorrection(state, reading, time, 0));
@@ -147,6 +147,39 @@ public sealed class PlayerTests
         Assert.IsNull(await host.ActionAsync(ActionKind.Select, Second));
         await Check.EventuallyAsync(() => host.View.Room?.Leader.Report is { Kind: ReportKind.Applied, Revision: 2 });
         Assert.AreEqual(Second, worker.View.Reading.Track);
+    }
+
+    [TestMethod]
+    public async Task LeaderUsesFreshObservationBeforePublishingUnknownTrack()
+    {
+        await using var server = await LocalServer.StartAsync();
+        await using var host = new RoomConnection(server.Uri, null);
+        await Check.EventuallyAsync(() => host.View.Status == ConnectionStatus.Connected);
+
+        int observations = 0;
+        var mock = new FakePlayer(() => host.Clock.Now)
+        {
+            BeforeObserve = async (player, token) =>
+            {
+                // The first poll handles the empty room and the second starts the debounce.
+                // Let the debounce expire during the next poll, then reveal the ID on the re-read.
+                switch (++observations)
+                {
+                    case 3:
+                        await Task.Delay(650, token);
+                        break;
+                    case 4:
+                        player.Manual(First, 3000, Playback.Paused);
+                        break;
+                }
+            }
+        };
+        mock.Manual(First, 0, Playback.Paused, exact: false);
+        await using var worker = new RoomPlayer(mock, () => host, 1200);
+
+        await Check.EventuallyAsync(() => host.View.Room?.State.Track == First);
+        Assert.AreEqual(1L, host.View.Room!.State.Revision);
+        Assert.AreEqual(3000L, host.View.Room.State.PositionMs);
     }
 
     [TestMethod]
@@ -370,7 +403,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     private TrackId? track;
     private Playback playback = Playback.Paused;
     private long position, anchored;
-    private bool exact, observedIdentity;
+    private bool exact;
     private int loads, seeks, playbackCommands, autoAdvances;
     public int Loads => Volatile.Read(ref loads);
     public int Seeks => Volatile.Read(ref seeks);
@@ -380,6 +413,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public TrackId? Unavailable { get; init; }
     public TrackId? NextOnEnd { get; init; }
     public Task? HoldFirst { get; init; }
+    public Func<FakePlayer, CancellationToken, Task>? BeforeObserve { get; init; }
 
     public void Manual(TrackId selected, long ms, Playback state, bool exact = true)
     {
@@ -390,12 +424,13 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
             playback = state;
             anchored = now();
             this.exact = exact;
-            observedIdentity = false;
         }
     }
 
-    public Task<PlayerReading> ObserveAsync(bool identify, CancellationToken token)
+    public async Task<PlayerReading> ObserveAsync(CancellationToken token)
     {
+        if (BeforeObserve is not null)
+            await BeforeObserve(this, token);
         lock (gate)
         {
             if (Running && track is not null && NextOnEnd is { } next && track != next &&
@@ -404,9 +439,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
                 Manual(next, 0, Playback.Playing);
                 Interlocked.Increment(ref autoAdvances);
             }
-            if (identify && exact)
-                observedIdentity = true;
-            return Task.FromResult(Read());
+            return Read();
         }
     }
 
@@ -429,7 +462,6 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
         lock (gate)
         {
             Manual(selected, 0, Playback.Playing);
-            observedIdentity = true;
             return Read();
         }
     }
@@ -466,7 +498,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
             return new(Running);
         long sample = now();
         return new(true, "Song " + track.Id, "Artist", "Album", playback, PositionAt(sample), DurationMs,
-            observedIdentity ? track : null, sample);
+            exact ? track : null, sample);
     }
 
     private long PositionAt(long sample) => Math.Min(DurationMs,
