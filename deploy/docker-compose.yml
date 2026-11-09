@@ -1,7 +1,7 @@
 name: musicsync
 services:
   server:
-    image: musicsync-server:${MUSICSYNC_IMAGE_TAG:-0.1.0}
+    image: "musicsync-server:${MUSICSYNC_IMAGE_TAG:?Set MUSICSYNC_IMAGE_TAG to the server image tag}"
     build:
       context: ..
       dockerfile: deploy/Dockerfile

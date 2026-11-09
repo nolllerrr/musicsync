@@ -1,15 +1,18 @@
 # Развёртывание и откат MusicSync на VPS
 
+Оба варианта требуют непустой `MUSICSYNC_IMAGE_TAG`. Задайте его в файле, переданном через `--env-file`. Для новой сборки используйте версию развёртываемой ревизии из `Directory.Build.props`, например `MUSICSYNC_IMAGE_TAG=0.1.9`. Если под этой версией уже собран образ другой ревизии, добавьте к тегу короткий хеш коммита. Перед обновлением запишите текущий тег и сохраните образ с этим тегом на VPS для отката. Значение, экспортированное в оболочке, имеет приоритет над файлом.
+
 ## Постоянный запуск с автоматическим TLS
 
 Профиль `deploy/docker-compose.acme.yml` запускает MusicSync и Caddy в отдельном Compose-проекте `musicsync`. Порт 8443 принимает HTTPS и WSS, а TCP 80 обслуживает проверку HTTP-01. Caddy выпускает и продлевает сертификат для публичного IPv4 или DNS-имени. Состояние сертификатов хранится в Docker-томе `musicsync_caddy_data`. [Сертификаты Let’s Encrypt для IP](https://letsencrypt.org/2026/01/15/6day-and-ip-general-availability) · [Автоматический HTTPS в Caddy](https://caddyserver.com/docs/automatic-https)
 
-Проверьте на VPS доступность портов 80 и 8443 и отсутствие пересечения сети `172.30.53.0/29` с маршрутами хоста и другими Docker-сетями. В `/opt/musicsync/musicsync.env` укажите публичный IP или DNS-имя в `MUSICSYNC_HOST`, адрес интерфейса VPS в `MUSICSYNC_BIND_IP` и тег текущей версии из `Directory.Build.props` в `MUSICSYNC_IMAGE_TAG`. По умолчанию порты публикуются на `127.0.0.1`. Docker должен запускаться при загрузке системы.
+Проверьте на VPS доступность портов 80 и 8443 и отсутствие пересечения сети `172.30.53.0/29` с маршрутами хоста и другими Docker-сетями. В `/opt/musicsync/musicsync.env` укажите тег образа в `MUSICSYNC_IMAGE_TAG`, публичный IP или DNS-имя в `MUSICSYNC_HOST` и адрес интерфейса VPS в `MUSICSYNC_BIND_IP`. По умолчанию порты публикуются на `127.0.0.1`. Docker должен запускаться при загрузке системы.
 
 ```bash
 cd /opt/musicsync/app
-docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml config --quiet
-docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml up -d --build
+docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml config --images
+docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml build server
+docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml up -d --no-build
 docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml logs --tail 50 edge
 ```
 
@@ -34,8 +37,8 @@ docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml log
 cd /opt/musicsync/app
 umask 077
 cp -n deploy/.env.example deploy/.env
-# Укажите в deploy/.env тег версии из Directory.Build.props, абсолютный путь PFX и пароль.
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml config --quiet
+# Заполните в deploy/.env MUSICSYNC_IMAGE_TAG, MUSICSYNC_PFX_FILE и MUSICSYNC_PFX_PASSWORD.
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml config --images
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml build server
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --no-build
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml ps
@@ -60,4 +63,14 @@ curl --fail --resolve music.example.net:8443:127.0.0.1 https://music.example.net
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml down
 ```
 
-Для возврата предыдущего образа сохраните его тег до обновления, восстановите прежние `MUSICSYNC_IMAGE_TAG` и параметры сертификата в `deploy/.env`, выполните `up -d --no-build` той же командой Compose и повторите проверку `/health`. Верните временные правила 8443 в исходное состояние после выключения сервиса.
+Для возврата предыдущего образа восстановите его `MUSICSYNC_IMAGE_TAG` и параметры сертификата в файле окружения выбранного варианта. Убедитесь, что `config --images` показывает прежний тег, затем запустите соответствующую команду из `/opt/musicsync/app`.
+
+```bash
+# Автоматический TLS через Caddy
+docker compose --env-file ../musicsync.env -f deploy/docker-compose.acme.yml up -d --no-build --pull never
+
+# Готовый PFX
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d --no-build --pull never
+```
+
+Повторите проверку `/health`. Верните временные правила 8443 в исходное состояние после выключения сервиса.
