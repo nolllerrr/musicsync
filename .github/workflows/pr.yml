@@ -46,7 +46,7 @@ jobs:
           }
 
   javascript:
-    name: Check JavaScript syntax
+    name: Check and test JavaScript
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -62,3 +62,5 @@ jobs:
           git ls-files -z -- '*.js' '*.cjs' | while IFS= read -r -d '' file; do
             node --check -- "$file"
           done
+      - name: Run Sonata tests
+        run: node --test tests/MusicSync.Tests/SonataPlayer.test.cjs
