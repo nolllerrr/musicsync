@@ -23,10 +23,14 @@ internal sealed class PatchInstallation
     private readonly string _asar;
     private readonly string _exe;
     private readonly string _payload;
+    private readonly Pair _originals;
 
-    internal PatchInstallation(string root)
+    internal PatchInstallation(string root) : this(root, Originals) { }
+
+    internal PatchInstallation(string root, Pair originals)
     {
         _root = root;
+        _originals = originals;
         _resources = Path.Combine(root, "resources");
         _state = Path.Combine(root, ".musicsync-together");
         _asar = Path.Combine(_resources, "app.asar");
@@ -37,6 +41,12 @@ internal sealed class PatchInstallation
     internal string Run(bool install, Uri? endpoint)
     {
         var agent = install ? GetAgentSource() : null;
+        var music = new YandexMusicRestart(_exe, Path.Combine(_payload, AgentName));
+        return Run(install, endpoint, agent, music);
+    }
+
+    internal string Run(bool install, Uri? endpoint, string? agent, YandexMusicRestart? music)
+    {
         if (!Directory.Exists(_root))
         {
             throw new DirectoryNotFoundException("Не найден каталог Яндекс Музыки. Сначала установите Яндекс Музыку для Windows.");
@@ -44,7 +54,6 @@ internal sealed class PatchInstallation
 
         using var installLock = AcquireLock();
         CheckPaths();
-        var music = new YandexMusicRestart(_exe, Path.Combine(_payload, AgentName));
         string result;
         try
         {
@@ -52,15 +61,15 @@ internal sealed class PatchInstallation
         }
         catch (Exception error)
         {
-            if (music.ShouldRestart && CanRestart())
+            if (music is { ShouldRestart: true } && CanRestart())
                 throw new InvalidOperationException(error.Message + music.RestartNotice(), error);
             throw;
         }
 
-        return result + music.RestartNotice();
+        return result + music?.RestartNotice();
     }
 
-    private string Apply(bool install, Uri? endpoint, string? agent, YandexMusicRestart music)
+    private string Apply(bool install, Uri? endpoint, string? agent, YandexMusicRestart? music)
     {
         var receipt = ReadReceipt();
 
@@ -82,7 +91,7 @@ internal sealed class PatchInstallation
 
         if (!install)
         {
-            if (receipt is null && current == Originals)
+            if (receipt is null && current == _originals)
             {
                 return "Патч уже снят.";
             }
@@ -93,13 +102,13 @@ internal sealed class PatchInstallation
 
             VerifyPayload(_payload, receipt, allowMissing: true);
             AssertBackups();
-            music.Close();
+            music?.Close();
             WriteReceipt(receipt with { Phase = Phase.Removing });
             RestoreOriginals(receipt, music);
             return "Патч удалён. Исходные файлы Яндекс Музыки восстановлены и проверены.";
         }
 
-        if (current != Originals && (receipt is null || current != receipt.Patched))
+        if (current != _originals && (receipt is null || current != receipt.Patched))
         {
             throw new InvalidOperationException("Контрольные суммы файлов Яндекс Музыки отличаются от проверенной сборки.");
         }
@@ -126,7 +135,7 @@ internal sealed class PatchInstallation
         var configHash = Hash(config);
         if (receipt is not null)
         {
-            music.Close();
+            music?.Close();
             RemovePayload(receipt);
         }
         else if (Directory.Exists(_payload) || File.Exists(_payload))
@@ -148,7 +157,7 @@ internal sealed class PatchInstallation
                 return false;
 
             var current = HashPair(_asar, _exe);
-            return current == Originals || current == receipt?.Patched;
+            return current == _originals || current == receipt?.Patched;
         }
         catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or JsonException)
         {
@@ -243,7 +252,7 @@ internal sealed class PatchInstallation
             bufferSize: 4096, FileOptions.DeleteOnClose);
     }
 
-    private void Install(string agent, byte[] config, string agentHash, string configHash, string bundleHash, YandexMusicRestart music)
+    private void Install(string agent, byte[] config, string agentHash, string configHash, string bundleHash, YandexMusicRestart? music)
     {
         Directory.CreateDirectory(_state);
         Receipt? receipt = null;
@@ -266,12 +275,12 @@ internal sealed class PatchInstallation
             var prepared = new Receipt(AsarPatch.Version, HashPair(patchedAsar, patchedExe), agentHash, configHash,
                 bundleHash, Phase.Installing);
             VerifyPayload(stagedPayload, prepared, allowMissing: false);
-            music.Close();
+            music?.Close();
             WriteReceipt(prepared);
             receipt = prepared;
             Directory.Move(stagedPayload, _payload);
-            ReplaceIfMatching(patchedAsar, _asar, Originals.Asar);
-            ReplaceIfMatching(patchedExe, _exe, Originals.Exe);
+            ReplaceIfMatching(patchedAsar, _asar, _originals.Asar);
+            ReplaceIfMatching(patchedExe, _exe, _originals.Exe);
             if (HashPair(_asar, _exe) != receipt.Patched)
             {
                 throw new IOException("Patched file verification failed.");
@@ -300,30 +309,30 @@ internal sealed class PatchInstallation
         }
     }
 
-    private void RestoreOriginals(Receipt receipt, YandexMusicRestart music)
+    private void RestoreOriginals(Receipt receipt, YandexMusicRestart? music)
     {
         // A failed ReplaceFile can remove the destination. The journal still owns the recovery.
         var asarHash = HashIfPresent(_asar);
         var exeHash = HashIfPresent(_exe);
-        if ((asarHash is not null && asarHash != Originals.Asar && asarHash != receipt.Patched.Asar) ||
-            (exeHash is not null && exeHash != Originals.Exe && exeHash != receipt.Patched.Exe))
+        if ((asarHash is not null && asarHash != _originals.Asar && asarHash != receipt.Patched.Asar) ||
+            (exeHash is not null && exeHash != _originals.Exe && exeHash != receipt.Patched.Exe))
         {
             throw new InvalidOperationException("Recovery stopped because Yandex Music files have unrecognized checksums.");
         }
-        if (asarHash != Originals.Asar || exeHash != Originals.Exe)
+        if (asarHash != _originals.Asar || exeHash != _originals.Exe)
         {
             AssertBackups();
         }
-        music.Close();
-        if (asarHash != Originals.Asar)
+        music?.Close();
+        if (asarHash != _originals.Asar)
         {
             RestoreFile("original.asar", _asar, asarHash);
         }
-        if (exeHash != Originals.Exe)
+        if (exeHash != _originals.Exe)
         {
             RestoreFile("original.exe", _exe, exeHash);
         }
-        if (HashPair(_asar, _exe) != Originals)
+        if (HashPair(_asar, _exe) != _originals)
         {
             throw new IOException("Original file verification failed.");
         }
@@ -348,7 +357,7 @@ internal sealed class PatchInstallation
 
     private void AssertBackups()
     {
-        if (HashPair(StatePath("original.asar"), StatePath("original.exe")) != Originals)
+        if (HashPair(StatePath("original.asar"), StatePath("original.exe")) != _originals)
         {
             throw new IOException("The original backup checksums do not match the verified build.");
         }
@@ -520,7 +529,7 @@ internal sealed class PatchInstallation
 
     private static bool IsHash(string? value) => value?.Length == 64 && value.All(Uri.IsHexDigit);
 
-    private readonly record struct Pair(string Asar, string Exe);
+    internal readonly record struct Pair(string Asar, string Exe);
     private sealed record Receipt(string Version, Pair Patched, string AgentHash, string ConfigHash, string BundleHash,
         Phase Phase, string? SettingsHash = null, string? PendingSettingsHash = null);
     private enum Phase { Installing = 1, Installed, Removing }

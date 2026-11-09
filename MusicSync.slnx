@@ -9,6 +9,7 @@
     <Project Path="src/MusicSync.Yandex/MusicSync.Yandex.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/MusicSync.Patch.Tests/MusicSync.Patch.Tests.csproj" />
     <Project Path="tests/MusicSync.Tests/MusicSync.Tests.csproj" />
   </Folder>
 </Solution>
