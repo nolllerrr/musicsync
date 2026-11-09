@@ -1,11 +1,17 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
+using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 
 internal partial class PatchWindow : Window
 {
     private readonly PatchInstallation _installation;
+    private readonly CancellationTokenSource _windowLifetime = new();
+    private Task<InstallerRelease?>? _updateCheck;
 
     internal PatchWindow(PatchInstallation installation)
     {
@@ -20,6 +26,89 @@ internal partial class PatchWindow : Window
             Endpoint.Text = PatchSettings.DefaultEndpoint().AbsoluteUri;
             SetNotice($"Не удалось прочитать настройки. {error.Message}");
         }
+    }
+
+    private async void CheckUpdatesOnLoad(object sender, RoutedEventArgs e)
+    {
+        Loaded -= CheckUpdatesOnLoad;
+        await CheckUpdatesAsync(interactive: false);
+    }
+
+    private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateButton.IsEnabled = false;
+        try
+        {
+            await CheckUpdatesAsync(interactive: true);
+        }
+        finally
+        {
+            UpdateButton.IsEnabled = true;
+        }
+    }
+
+    private async Task CheckUpdatesAsync(bool interactive)
+    {
+        var cancellationToken = _windowLifetime.Token;
+        InstallerRelease? release;
+        try
+        {
+            if (_updateCheck is not { IsCompleted: false })
+                _updateCheck = InstallerRelease.CheckAsync(cancellationToken);
+            release = await _updateCheck;
+        }
+        catch (Exception error) when (error is HttpRequestException or JsonException or IOException or InvalidDataException
+                                      or OperationCanceledException)
+        {
+            if (interactive && !cancellationToken.IsCancellationRequested)
+                MessageBox.Show(this, "Не удалось проверить обновления. Попробуйте ещё раз позже.",
+                    "Обновления MusicSync", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        if (cancellationToken.IsCancellationRequested)
+            return;
+
+        UpdateBadge.Visibility = release is null ? Visibility.Collapsed : Visibility.Visible;
+        var buttonLabel = release is null
+            ? "Проверить обновления"
+            : $"Доступно обновление MusicSync {release.Version}";
+        UpdateButton.ToolTip = buttonLabel;
+        AutomationProperties.SetName(UpdateButton, buttonLabel);
+
+        if (!interactive)
+            return;
+
+        if (release is null)
+        {
+            MessageBox.Show(this, "У вас актуальная версия MusicSync.", "Обновления MusicSync",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (MessageBox.Show(this, $"Доступна версия MusicSync {release.Version}. Скачать новый установщик?",
+                "Обновления MusicSync", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes)
+            return;
+
+        try
+        {
+            using var browser = Process.Start(new ProcessStartInfo(release.DownloadUrl.AbsoluteUri)
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Win32Exception)
+        {
+            MessageBox.Show(this, "Не удалось открыть ссылку на скачивание.", "Обновления MusicSync",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        _windowLifetime.Cancel();
+        _windowLifetime.Dispose();
+        base.OnClosed(e);
     }
 
     private async void Install_Click(object sender, RoutedEventArgs e)
