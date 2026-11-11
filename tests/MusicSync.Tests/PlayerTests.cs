@@ -413,6 +413,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public TrackId? Unavailable { get; init; }
     public TrackId? NextOnEnd { get; init; }
     public Task? HoldFirst { get; init; }
+    public TaskCompletionSource FirstLoadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public Func<FakePlayer, CancellationToken, Task>? BeforeObserve { get; init; }
 
     public void Manual(TrackId selected, long ms, Playback state, bool exact = true)
@@ -455,8 +456,12 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
 
     public async Task<PlayerReading> LoadAsync(TrackId selected, CancellationToken token)
     {
-        if (Interlocked.Increment(ref loads) == 1 && HoldFirst is not null)
-            await HoldFirst.WaitAsync(token);
+        if (Interlocked.Increment(ref loads) == 1)
+        {
+            FirstLoadStarted.TrySetResult();
+            if (HoldFirst is not null)
+                await HoldFirst.WaitAsync(token);
+        }
         if (selected == Unavailable)
             throw new PlayerException("track-unavailable");
         lock (gate)

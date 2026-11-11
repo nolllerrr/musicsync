@@ -7,9 +7,17 @@ namespace MusicSync.Core;
 public enum ConnectionStatus { Connecting, Connected, Reconnecting, Ended }
 
 public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, RoomView? Room = null,
-    long Generation = 0, string? Error = null);
+    long Generation = 0, string? Error = null)
+{
+    public IReadOnlyList<PublicParticipant> Participants { get; init; } = Array.Empty<PublicParticipant>();
+    public Guid? SelfParticipantId { get; init; }
+    public int Capacity { get; init; }
+    public PlayerReport? LeaderReport => RoomMembership.LeaderReport(this);
+    // Compatibility for the two-person UI; group UI must use Participants.
+    public bool? PeerConnected => RoomMembership.PeerConnected(this);
+}
 
-public sealed class RoomConnection : IAsyncDisposable
+public sealed class RoomConnection : IRoomConnection, IAsyncDisposable
 {
     private static readonly HttpMessageInvoker Ipv4WebSocketInvoker = new(new SocketsHttpHandler
     {
@@ -40,6 +48,13 @@ public sealed class RoomConnection : IAsyncDisposable
     private int disposed;
     public SyncClock Clock { get; } = new(new MonotonicClock());
     public ConnectionView View => view;
+    public event Action? Changed;
+
+    private void SetView(ConnectionView next)
+    {
+        view = next;
+        Changed?.Invoke();
+    }
 
     public RoomConnection(Uri endpoint, string? invitation, Action<string>? log = null)
     {
@@ -175,8 +190,8 @@ public sealed class RoomConnection : IAsyncDisposable
                 if (welcome is not { Type: "welcome", Room: not null, Role: not null })
                     throw new InvalidDataException("Expected a room snapshot.");
                 joined = welcome.Room.State.RoomId;
-                var initialRoom = welcome.Room;
-                var role = welcome.Role;
+                var initialView = RoomMembership.Update(
+                    new(ConnectionStatus.Connected, welcome.Role, welcome.Room, View.Generation + 1), welcome);
                 while (true)
                 {
                     var first = await ReceiveAsync(socket, connectTimeout.Token);
@@ -187,8 +202,10 @@ public sealed class RoomConnection : IAsyncDisposable
                     }
                     if (first is { Type: "snapshot", Room: not null })
                     {
-                        initialRoom = first.Room;
-                        role = first.Role ?? role;
+                        initialView = RoomMembership.Update(initialView with
+                        {
+                            Room = first.Room, Role = first.Role ?? initialView.Role
+                        }, first);
                     }
                     else if (first is { Type: "pong", Ping: not null, Received: not null, Sent: not null } && first.Ping == ping)
                     {
@@ -202,10 +219,10 @@ public sealed class RoomConnection : IAsyncDisposable
                 lock (gate)
                 {
                     active = transport;
-                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1);
+                    SetView(initialView);
                 }
                 delay = 1;
-                log?.Invoke($"Connected ({role}).");
+                log?.Invoke($"Connected ({initialView.Role}).");
                 heartbeat = HeartbeatAsync(transport, attempt);
                 while (!attempt.IsCancellationRequested)
                 {
@@ -216,7 +233,10 @@ public sealed class RoomConnection : IAsyncDisposable
                             var current = View;
                             if (message.Room.State.RoomId == joined &&
                                 message.Room.State.Revision >= current.Room!.State.Revision)
-                                view = current with { Role = message.Role ?? current.Role, Room = message.Room };
+                                SetView(RoomMembership.Update(current with
+                                {
+                                    Role = message.Role ?? current.Role, Room = message.Room
+                                }, message));
                             break;
                         case { Type: "pong", Ping: not null, Received: not null, Sent: not null }:
                             ObservePong(message);
@@ -246,7 +266,7 @@ public sealed class RoomConnection : IAsyncDisposable
             {
                 if (!cancellation.IsCancellationRequested)
                 {
-                    view = View with { Status = ConnectionStatus.Reconnecting, Error = "connection-lost" };
+                    SetView(View with { Status = ConnectionStatus.Reconnecting, Error = "connection-lost" });
                     log?.Invoke($"Connection interrupted ({ex.GetType().Name}).");
                 }
             }
@@ -293,7 +313,7 @@ public sealed class RoomConnection : IAsyncDisposable
 
     private void End(string reason)
     {
-        view = View with { Status = ConnectionStatus.Ended, Error = reason };
+        SetView(View with { Status = ConnectionStatus.Ended, Error = reason });
         log?.Invoke($"Room ended ({reason}).");
     }
 
