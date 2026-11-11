@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="MusicSync.Patch" />
+    <InternalsVisibleTo Include="MusicSync.Agent.Tests" />
     <ProjectReference Include="../MusicSync.Core/MusicSync.Core.csproj" />
     <ProjectReference Include="../MusicSync.Yandex/MusicSync.Yandex.csproj" />
   </ItemGroup>

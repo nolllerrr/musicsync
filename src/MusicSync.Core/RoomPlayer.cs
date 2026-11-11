@@ -5,20 +5,23 @@ public sealed record PlayerView(PlayerReading Reading, ReportKind Kind, string? 
 public sealed class RoomPlayer : IAsyncDisposable
 {
     private readonly IPlayer player;
-    private readonly Func<RoomConnection?> connection;
+    private readonly Func<IRoomConnection?> connection;
     private readonly long threshold;
+    private readonly TimeProvider time;
     private readonly Action<string>? log;
     private readonly CancellationTokenSource stop = new();
     private readonly Task worker;
     private volatile PlayerView view = new(new(false), ReportKind.Waiting);
     private int retry;
 
-    public RoomPlayer(IPlayer player, Func<RoomConnection?> connection, long threshold, Action<string>? log = null)
+    public RoomPlayer(IPlayer player, Func<IRoomConnection?> connection, long threshold, Action<string>? log = null,
+        TimeProvider? timeProvider = null)
     {
         this.player = player;
         this.connection = connection;
         this.threshold = threshold;
         this.log = log;
+        time = timeProvider ?? TimeProvider.System;
         worker = Task.Run(RunAsync);
     }
 
@@ -28,8 +31,8 @@ public sealed class RoomPlayer : IAsyncDisposable
     private async Task RunAsync()
     {
         var token = stop.Token;
-        RoomConnection? previous = null;
-        (long Generation, long Revision, int Retry)? handled = null;
+        IRoomConnection? previous = null;
+        (long Generation, long Revision, Role? Role, int Retry)? handled = null;
         TrackId? controlled = null;
         long? controlledDuration = null, handoffRevision = null;
         bool applied = false;
@@ -40,6 +43,26 @@ public sealed class RoomPlayer : IAsyncDisposable
             var room = connection();
             var network = room?.View;
             var state = network?.Room?.State;
+            using var operation = CancellationTokenSource.CreateLinkedTokenSource(token);
+            var cancellationGate = new object();
+            bool observingChanges = true;
+            void CancelObsolete()
+            {
+                lock (cancellationGate)
+                {
+                    if (!observingChanges)
+                        return;
+                    var current = room?.View;
+                    if (connection() != room || current?.Status != network?.Status ||
+                        current?.Generation != network?.Generation || current?.Role != network?.Role ||
+                        current?.Room?.State.Revision != state?.Revision)
+                        operation.Cancel();
+                }
+            }
+            if (room is not null)
+                room.Changed += CancelObsolete;
+            CancelObsolete();
+            var operationToken = operation.Token;
             if (room != previous)
             {
                 handled = null;
@@ -53,20 +76,21 @@ public sealed class RoomPlayer : IAsyncDisposable
             var reading = View.Reading;
             try
             {
-                var observed = await player.ObserveAsync(token);
+                var observed = await player.ObserveAsync(operationToken);
                 view = view with { Reading = observed };
                 bool playerReturned = observed.Running && !reading.Running;
                 reading = observed;
                 if (room is not null && network is { Status: ConnectionStatus.Connected or ConnectionStatus.Reconnecting }
                     && state is not null)
                 {
-                    var key = (network.Generation, state.Revision, Retry: Volatile.Read(ref retry));
+                    var key = (network.Generation, state.Revision, network.Role, Retry: Volatile.Read(ref retry));
                     long Now() => room.Clock.Now;
                     long now = Now();
                     var applier = new PlaybackApplier(player, Now, threshold);
                     bool leader = network.Role == Role.Leader;
                     bool Current() => connection() == room && room.View is { } current && current.Status == network.Status &&
-                        current.Generation == key.Generation && current.Room?.State.Revision == key.Revision;
+                        current.Generation == key.Generation && current.Role == key.Role &&
+                        current.Room?.State.Revision == key.Revision && !operationToken.IsCancellationRequested;
 
                     if (!Current())
                         continue;
@@ -74,7 +98,7 @@ public sealed class RoomPlayer : IAsyncDisposable
                     // A reconnect with the same revision must not overwrite actions made in the leader's player.
                     if (leader && network.Status == ConnectionStatus.Connected && applied &&
                         handled is { } previousKey && previousKey.Generation != key.Generation &&
-                        previousKey.Revision == key.Revision && previousKey.Retry == key.Retry)
+                        previousKey.Revision == key.Revision && previousKey.Role == key.Role && previousKey.Retry == key.Retry)
                     {
                         handled = key;
                         lastReport = 0;
@@ -85,7 +109,7 @@ public sealed class RoomPlayer : IAsyncDisposable
                         handoffRevision = state.Revision;
                         if (reading.Playback == Playback.Playing)
                         {
-                            reading = await player.PauseForHandoffAsync(token);
+                            reading = await player.PauseForHandoffAsync(operationToken);
                             view = view with { Reading = reading };
                         }
                         await ReportHandoffAsync();
@@ -120,7 +144,7 @@ public sealed class RoomPlayer : IAsyncDisposable
                         {
                             if (!leader && controlled is not null && reading.Track == controlled &&
                                 reading.Playback == Playback.Playing)
-                                reading = await player.SetPlaybackAsync(Playback.Paused, token);
+                                reading = await player.SetPlaybackAsync(Playback.Paused, operationToken);
                             controlled = null;
                             if (Current())
                                 await ReportAsync(ReportKind.Unknown, "unknown-track");
@@ -141,7 +165,7 @@ public sealed class RoomPlayer : IAsyncDisposable
                             {
                                 nextProbe = now + 3000;
                                 // The queue and live media may have caught up since the initial observation.
-                                reading = await player.ObserveAsync(token);
+                                reading = await player.ObserveAsync(operationToken);
                                 view = view with { Reading = reading };
                             }
                             if (reading.Ready && Current())
@@ -200,7 +224,7 @@ public sealed class RoomPlayer : IAsyncDisposable
 
                         var localDuration = reading.Track == state.Track ? reading.DurationMs : null;
                         var knownDuration = localDuration ?? (controlled == state.Track ? controlledDuration : null)
-                            ?? network.Room!.Leader.Report?.DurationMs;
+                            ?? network.LeaderReport?.DurationMs;
                         if (knownDuration is not (> 0 and var duration))
                             return false;
                         return PlaybackApplier.IsNearEnd(state.PositionAt(now, duration), duration) ||
@@ -234,7 +258,7 @@ public sealed class RoomPlayer : IAsyncDisposable
                         var timer = System.Diagnostics.Stopwatch.StartNew();
                         try
                         {
-                            var result = await applier.ApplyAsync(state, reading, Current, token, holdAtEnd: !leader);
+                            var result = await applier.ApplyAsync(state, reading, Current, operationToken, holdAtEnd: !leader);
                             reading = result.Reading;
                             if (result.WaitingForNextTrack)
                             {
@@ -279,19 +303,33 @@ public sealed class RoomPlayer : IAsyncDisposable
                 }
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
+            catch (OperationCanceledException) when (operation.IsCancellationRequested) { }
             catch (Exception ex)
             {
+                if (operation.IsCancellationRequested)
+                    continue;
                 var detail = PlayerError(ex);
                 if (view.Detail != detail)
                     LogError(ex);
                 view = new(reading, ReportKind.Failed, detail);
                 if (room is not null && network is { Status: ConnectionStatus.Connected } && state is not null &&
-                    room.View.Room?.State.Revision == state.Revision && room.View.Generation == network.Generation)
+                    room.View.Room?.State.Revision == state.Revision && room.View.Generation == network.Generation &&
+                    room.View.Role == network.Role)
                     await room.ReportAsync(new PlayerReport(state.Revision, ReportKind.Failed, Detail: detail),
                         network.Generation);
             }
 
-            try { await Task.Delay(room is null ? 900 : 450, token); }
+            finally
+            {
+                lock (cancellationGate)
+                {
+                    observingChanges = false;
+                    if (room is not null)
+                        room.Changed -= CancelObsolete;
+                }
+            }
+
+            try { await Task.Delay(TimeSpan.FromMilliseconds(room is null ? 900 : 450), time, token); }
             catch (OperationCanceledException) { return; }
         }
     }
