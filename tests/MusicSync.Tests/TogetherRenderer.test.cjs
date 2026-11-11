@@ -25,7 +25,7 @@ function setup() {
   let animation;
   const calls = [];
   const timers = new Map();
-  const api = Object.fromEntries(['create', 'join', 'leave', 'swapRoles', 'retryPlayback', 'copyCode'].map(name =>
+  const api = Object.fromEntries(['create', 'join', 'leave', 'swapRoles', 'transferLeadership', 'acceptLeadership', 'cancelLeadership', 'retryPlayback', 'copyCode'].map(name =>
     [name, async value => { calls.push([name, value]); return {}; }]));
   api.subscribe = listener => { receive = listener; subscriptions++; return () => {}; };
   const window = {
@@ -252,11 +252,11 @@ test('preserves create, join, copy, retry, leave and legacy role requests', asyn
   ]);
 });
 
-test('reserves group transfer selection without enabling the untargeted legacy command', () => {
+test('group state hides the untargeted legacy command', () => {
   const ui = setup();
   ui.state(room(2, { peerConnected: true, swap: { id: 'legacy', requestedBy: 'listener', remainingMs: 30_000 } }));
   assert.equal(ui.button('Сменить роли').disabled, true);
-  assert.match(ui.panel.textContent, /Выбор участника для передачи управления/);
+  assert.equal(ui.button('Сменить роли').hidden, true);
   assert.equal(ui.byClass('stack music-sync-together-request').hidden, true);
 });
 
@@ -269,4 +269,41 @@ test('shows capacity and connection errors without losing playback retry', () =>
   ui.state(room(10, { playbackError: 'track-unavailable' }));
   assert.equal(ui.button('Повторить синхронизацию').disabled, false);
   assert.match(ui.panel.textContent, /Трек недоступен в плеере/);
+});
+
+
+test('targets one listener and preserves the offer until explicit confirmation', async () => {
+  const ui = setup();
+  ui.state(room(10, { supportsLeadershipTransfer: true }));
+  const transferButtons = ui.rows().map(row => row.querySelectorAll('button')[0]);
+  assert.equal(transferButtons[0].hidden, true);
+  assert.equal(transferButtons[7].hidden, false);
+  await transferButtons[7].dispatch('click');
+  assert.deepEqual(ui.calls, [['transferLeadership', 'p8']]);
+  const transfer = { id: 'offer', initiatorParticipantId: 'self', targetParticipantId: 'p8', remainingMs: 20_000 };
+  ui.state(room(10, { supportsLeadershipTransfer: true, transfer }));
+  assert.equal(transferButtons[7].disabled, true);
+  assert.match(ui.panel.textContent, /Запрос отправлен выбранному участнику/);
+  assert.equal(ui.button('Принять управление').hidden, true);
+  await ui.button('Отменить передачу').dispatch('click');
+  assert.deepEqual(ui.calls.at(-1), ['cancelLeadership', 'offer']);
+  ui.state(room(10, { supportsLeadershipTransfer: true, transfer, selfParticipantId: 'p8', role: 'listener' }));
+  assert.equal(ui.button('Принять управление').hidden, false);
+  assert.equal(ui.button('Принять управление').disabled, false);
+  await ui.button('Принять управление').dispatch('click');
+  assert.deepEqual(ui.calls.at(-1), ['acceptLeadership', 'offer']);
+  ui.state(room(10, { supportsLeadershipTransfer: true, transfer, selfParticipantId: 'p2', role: 'listener' }));
+  assert.equal(ui.byClass('stack music-sync-together-request').hidden, true);
+});
+
+test('transfer controls disable offline, expired and disconnected targets', () => {
+  const ui = setup();
+  ui.state(room(2, { supportsLeadershipTransfer: true, participants: [member('self', 'leader'), member('p2', 'listener', false)] }));
+  assert.equal(ui.rows()[1].querySelector('button').disabled, true);
+  const transfer = { id: 'offer', initiatorParticipantId: 'p2', targetParticipantId: 'self', remainingMs: 0 };
+  ui.state(room(2, { supportsLeadershipTransfer: true, role: 'listener', transfer }));
+  assert.equal(ui.button('Принять управление').disabled, true);
+  ui.state(room(2, { supportsLeadershipTransfer: true, role: 'listener', transfer: { ...transfer, remainingMs: 20_000 }, status: 'reconnecting' }));
+  assert.equal(ui.button('Принять управление').disabled, true);
+  assert.equal(ui.button('Отменить передачу').disabled, true);
 });

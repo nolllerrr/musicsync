@@ -192,7 +192,8 @@ function install() {
 
   ipcMain.handle(namespace + 'command', async (event, name, argument) => {
     if (!trusted(event) || quitting) return { error: 'invalid-command' };
-    if (name !== 'create' && name !== 'join' && name !== 'swapRoles' && name !== 'retryPlayback' && name !== 'leave') {
+    if (name !== 'create' && name !== 'join' && name !== 'swapRoles' && name !== 'transferLeadership' &&
+        name !== 'acceptLeadership' && name !== 'cancelLeadership' && name !== 'retryPlayback' && name !== 'leave') {
       return { error: 'invalid-command' };
     }
 
@@ -205,6 +206,11 @@ function install() {
     if (name === 'swapRoles' && argument != null) {
       if (typeof argument !== 'string' || !swapId.test(argument)) return { error: 'invalid-command' };
       parameters.swapId = argument;
+    }
+
+    if (['transferLeadership', 'acceptLeadership', 'cancelLeadership'].includes(name)) {
+      if (typeof argument !== 'string' || !swapId.test(argument)) return { error: 'invalid-command' };
+      parameters[name === 'transferLeadership' ? 'targetParticipantId' : 'transferId'] = argument;
     }
 
     if (name === 'leave') return agent ? agent.stop('leave') : { error: 'no-room' };

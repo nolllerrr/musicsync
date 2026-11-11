@@ -139,8 +139,13 @@ public sealed class LeadershipTransferPolicyTests
         var unknown = new RoomState("ROOM", 8, 3, null, Playback.Paused, 0, Now, true);
         Assert.AreEqual(unknown with { Revision = 9, ServerTimestamp = Now + 2500 },
             LeadershipTransferPolicy.AdvancePlaybackEpoch(unknown, Now + 2500));
-        var playing = unknown with { Track = new("1", "2"), Unknown = false, Playback = Playback.Playing,
-            PositionMs = Protocol.MaxPositionMs - 1 };
+        var playing = unknown with
+        {
+            Track = new("1", "2"),
+            Unknown = false,
+            Playback = Playback.Playing,
+            PositionMs = Protocol.MaxPositionMs - 1
+        };
         Assert.AreEqual(Protocol.MaxPositionMs, LeadershipTransferPolicy.AdvancePlaybackEpoch(playing, Now + 2500).PositionMs);
     }
 }

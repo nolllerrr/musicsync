@@ -58,7 +58,8 @@ public sealed record RoomState(string RoomId, long Revision, long Selection,
 public sealed record RoomAction(ActionKind Kind, long BaseRevision, TrackId? Track = null,
     long? PositionMs = null, Playback? Playback = null)
 {
-    [JsonIgnore] public bool IsValid => BaseRevision >= 0 && (Kind switch
+    [JsonIgnore]
+    public bool IsValid => BaseRevision >= 0 && (Kind switch
     {
         ActionKind.Select => Track is { IsValid: true } && PositionMs is null && Playback is null,
         ActionKind.Adopt => Track is { IsValid: true } && ValidPosition && Playback is not null,
@@ -75,8 +76,10 @@ public sealed record PlayerReport(long Revision, ReportKind Kind, long? Position
     long? DurationMs = null, long? SampleTime = null, long? RttMs = null, Playback? Playback = null,
     long? ApplyMs = null, string? Detail = null)
 {
-    [JsonIgnore] public bool IsValid => Revision >= 0 &&
-        ApplyMs is null or (>= 0 and <= 120_000) && Detail is null or { Length: <= 350 } &&
+    [JsonIgnore]
+    public bool IsValid => Revision >= 0 &&
+        ApplyMs is null or (>= 0 and <= 120_000) && (Detail is null || Detail.Length <= 64 &&
+            Detail.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '-')) &&
         (Kind is ReportKind.Applied or ReportKind.Corrected
             ? PositionMs is >= 0 and <= Protocol.MaxPositionMs &&
                 DurationMs is > 0 and <= Protocol.MaxPositionMs && PositionMs <= DurationMs &&
@@ -90,10 +93,11 @@ public sealed record RoleSwap(Guid Id, Role? RequestedBy = null, long? ExpiresAt
 public sealed record RoomView(RoomState State, IReadOnlyList<Participant> Participants, int Capacity, RoleSwap? Swap = null,
     LeadershipTransfer? Transfer = null)
 {
-    // Source compatibility for the pair UI and drift calculation until the group client PRs.
+    // Pair projections for SyncClock.Difference and regression checks.
     // These projections are never part of the v2 wire contract.
     [JsonIgnore] public Participant Leader => Participants.Single(p => p.Role == Role.Leader);
-    [JsonIgnore] public Participant Listener => Participants.Count == 2
+    [JsonIgnore]
+    public Participant Listener => Participants.Count == 2
         ? Participants.Single(p => p.Role == Role.Listener)
         : new(Guid.Empty, Role.Listener, false, null);
 }
@@ -112,7 +116,7 @@ public static class Protocol
     public const string RoleSwapSubProtocol = "musicsync.roleswap";
     public const string LeadershipTransferSubProtocol = "musicsync.leadership-transfer";
     public const int MaxMessageBytes = 4096;
-    public const int MaxServerMessageBytes = 32 * 1024;
+    public const int MaxServerMessageBytes = 8 * 1024;
     public const long MaxPositionMs = 24 * 60 * 60 * 1000;
     public static readonly TimeSpan Heartbeat = TimeSpan.FromSeconds(2);
     public static readonly TimeSpan ReceiveTimeout = TimeSpan.FromSeconds(12);

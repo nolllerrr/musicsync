@@ -17,9 +17,10 @@ public sealed class LeadershipTransferClientTests
     {
         var offer = new LeadershipTransfer(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 123_456);
         var state = new RoomState(Protocol.NewCode(), 1, 1, null, Playback.Paused, 0, 100_000, false);
-        var room = new RoomView(state, new(true, null), new(true, null), Transfer: offer);
+        var room = new RoomView(state, [new(offer.InitiatorParticipantId, Role.Leader, true, null),
+            new(offer.TargetParticipantId, Role.Listener, true, null)], 10, Transfer: offer);
         string json = JsonSerializer.Serialize(room, Protocol.Json);
-        Assert.AreEqual(room, JsonSerializer.Deserialize<RoomView>(json, Protocol.Json));
+        Assert.AreEqual(json, JsonSerializer.Serialize(JsonSerializer.Deserialize<RoomView>(json, Protocol.Json), Protocol.Json));
         var command = new ClientMessage(Protocol.Version, "transfer-leadership", Id: Guid.NewGuid(),
             TargetParticipantId: offer.TargetParticipantId);
         Assert.AreEqual(command, JsonSerializer.Deserialize<ClientMessage>(JsonSerializer.Serialize(command, Protocol.Json), Protocol.Json));
@@ -30,17 +31,17 @@ public sealed class LeadershipTransferClientTests
     }
 
     [TestMethod]
-    public async Task LegacyServerKeepsRoleSwapAndRejectsNewMethodsWithoutSendingThem()
+    public async Task IntegratedServerNegotiatesTransferAndPreservesPairRoleSwap()
     {
         await using var server = await LocalServer.StartAsync();
         await using var leader = new RoomConnection(server.Uri, null);
         await Check.EventuallyAsync(() => leader.View.Status == ConnectionStatus.Connected);
         await using var listener = new RoomConnection(server.Uri, leader.View.Room!.State.RoomId);
         await Check.EventuallyAsync(() => listener.View.Status == ConnectionStatus.Connected && leader.View.Room?.Swap is not null);
-        Assert.IsFalse(leader.View.SupportsLeadershipTransfer);
+        Assert.IsTrue(leader.View.SupportsLeadershipTransfer);
         Assert.AreEqual("leadership-transfer-unavailable", await leader.TransferLeadershipAsync(Guid.NewGuid()));
-        Assert.AreEqual("leadership-transfer-unavailable", await listener.AcceptLeadershipAsync(Guid.NewGuid()));
-        Assert.AreEqual("leadership-transfer-unavailable", await leader.CancelLeadershipAsync(Guid.NewGuid()));
+        Assert.AreEqual("leadership-transfer-stale", await listener.AcceptLeadershipAsync(Guid.NewGuid()));
+        Assert.AreEqual("leadership-transfer-stale", await leader.CancelLeadershipAsync(Guid.NewGuid()));
         var id = leader.View.Room!.Swap!.Id;
         Assert.IsNull(await leader.SwapRolesAsync(id));
         Assert.IsNull(await listener.SwapRolesAsync(id));
@@ -128,7 +129,7 @@ public sealed class LeadershipTransferClientTests
         catch (WebSocketException) { }
     }
 
-    // A scripted wire-contract peer, not a group-room implementation. Actual group integration awaits PR 1.
+    // A scripted peer isolates wire-contract errors from the real registry integration tests.
     private static async Task<LocalServer> StartContractEndpointAsync(Role role, LeadershipTransfer offer,
         ChannelWriter<ClientMessage> commands)
     {
@@ -143,8 +144,10 @@ public sealed class LeadershipTransferClientTests
                 await Wire.ReceiveAsync<ClientMessage>(socket, TimeSpan.FromSeconds(3), token); // hello
                 var ping = await Wire.ReceiveAsync<ClientMessage>(socket, TimeSpan.FromSeconds(3), token);
                 var room = new RoomView(new(Protocol.NewCode(), 0, 0, null, Playback.Paused, 0, clock.Now, false),
-                    new(true, null), new(true, null), Transfer: offer);
-                await Wire.SendAsync(socket, new ServerMessage(Protocol.Version, "welcome", role, room), token);
+                    [new(offer.InitiatorParticipantId, Role.Leader, true, null),
+                     new(offer.TargetParticipantId, Role.Listener, true, null)], 10, Transfer: offer);
+                await Wire.SendAsync(socket, new ServerMessage(Protocol.Version, "welcome", role, room,
+                    ParticipantId: role == Role.Leader ? offer.InitiatorParticipantId : offer.TargetParticipantId), token);
                 await Wire.SendAsync(socket, new ServerMessage(Protocol.Version, "pong", Ping: ping!.Ping,
                     Received: clock.Now, Sent: clock.Now), token);
                 while (await Wire.ReceiveAsync<ClientMessage>(socket, Protocol.ReceiveTimeout, token) is { } message)

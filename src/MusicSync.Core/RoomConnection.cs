@@ -9,11 +9,11 @@ public enum ConnectionStatus { Connecting, Connected, Reconnecting, Ended }
 public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, RoomView? Room = null,
     long Generation = 0, string? Error = null, Guid? ParticipantId = null, bool SupportsLeadershipTransfer = false)
 {
-    public IReadOnlyList<PublicParticipant> Participants { get; init; } = Array.Empty<PublicParticipant>();
+    public IReadOnlyList<Participant> Participants { get; init; } = Array.Empty<Participant>();
     public Guid? SelfParticipantId { get; init; }
     public int Capacity { get; init; }
     public PlayerReport? LeaderReport => RoomMembership.LeaderReport(this);
-    // Compatibility for the two-person UI; group UI must use Participants.
+    // Summary compatibility; the roster uses Participants.
     public bool? PeerConnected => RoomMembership.PeerConnected(this);
 }
 
@@ -245,7 +245,8 @@ public sealed class RoomConnection : IRoomConnection, IAsyncDisposable
                     {
                         initialView = RoomMembership.Update(initialView with
                         {
-                            Room = first.Room, Role = first.Role ?? initialView.Role
+                            Room = first.Room,
+                            Role = first.Role ?? initialView.Role
                         }, first);
                     }
                     else if (first is { Type: "pong", Ping: not null, Received: not null, Sent: not null } && first.Ping == ping)
@@ -260,8 +261,11 @@ public sealed class RoomConnection : IRoomConnection, IAsyncDisposable
                 lock (gate)
                 {
                     active = transport;
-                    SetView(initialView with { SupportsLeadershipTransfer =
-                        socket.SubProtocol == Protocol.LeadershipTransferSubProtocol });
+                    SetView(initialView with
+                    {
+                        SupportsLeadershipTransfer =
+                        socket.SubProtocol == Protocol.LeadershipTransferSubProtocol
+                    });
                 }
                 delay = 1;
                 log?.Invoke($"Connected ({initialView.Role}).");
@@ -277,7 +281,8 @@ public sealed class RoomConnection : IRoomConnection, IAsyncDisposable
                                 message.Room.State.Revision >= current.Room!.State.Revision)
                                 SetView(RoomMembership.Update(current with
                                 {
-                                    Role = message.Role ?? current.Role, Room = message.Room
+                                    Role = message.Role ?? current.Role,
+                                    Room = message.Room
                                 }, message));
                             break;
                         case { Type: "pong", Ping: not null, Received: not null, Sent: not null }:

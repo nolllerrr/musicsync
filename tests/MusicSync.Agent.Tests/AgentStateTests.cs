@@ -11,15 +11,42 @@ namespace MusicSync.Agent.Tests;
 public sealed class AgentStateTests
 {
     [TestMethod]
-    public void PipePublishesAllPublicParticipantsAndSelfIdentity()
+    public void TransferProjectionUsesPublicIdsAndClearsConsentWhileOffline()
     {
-        var participants = Enumerable.Range(0, 10).Select(i => new PublicParticipant(Guid.NewGuid(),
+        var leader = Guid.NewGuid();
+        var target = Guid.NewGuid();
+        var transfer = new LeadershipTransfer(Guid.NewGuid(), leader, target, 40_000);
+        var view = new ConnectionView(ConnectionStatus.Connected, Role.Listener,
+            new(new(Protocol.NewCode(), 1, 1, null, Playback.Paused, 0, 10_000, false),
+                [new(leader, Role.Leader, true, null), new(target, Role.Listener, true, null)], 10, Transfer: transfer),
+            SupportsLeadershipTransfer: true)
+        {
+            SelfParticipantId = target,
+            Capacity = 10
+        };
+        var state = AgentState.Project(view, 15_000, null);
+        Assert.IsTrue(state.SupportsLeadershipTransfer);
+        Assert.AreEqual(new AgentTransfer(transfer.Id, leader, target, 25_000), state.Transfer);
+        Assert.IsNull(AgentState.Project(view with { Status = ConnectionStatus.Reconnecting }, 15_000, null).Transfer);
+        Assert.IsNull(AgentState.Project(view with { Status = ConnectionStatus.Ended }, 15_000, null).Transfer);
+        Assert.AreEqual(0L, AgentState.Project(view, 45_000, null).Transfer!.RemainingMs);
+        string json = JsonSerializer.Serialize(state, Protocol.Json);
+        Assert.DoesNotContain("token", json);
+        Assert.DoesNotContain("expiresAt", json);
+    }
+
+    [TestMethod]
+    public void PipePublishesAllParticipantsAndSelfIdentity()
+    {
+        var participants = Enumerable.Range(0, 10).Select(i => new Participant(Guid.NewGuid(),
             i == 0 ? Role.Leader : Role.Listener, i != 4,
             i == 3 ? new(1, ReportKind.Failed, Detail: "track-unavailable") : null)).ToArray();
         var view = new ConnectionView(ConnectionStatus.Connected, Role.Listener,
-            new(new("ROOM", 1, 1, new("1", "2"), Playback.Paused, 0, 1, false), new(true, null), new(true, null)), 1)
+            new(new("ROOM", 1, 1, new("1", "2"), Playback.Paused, 0, 1, false), participants, 10), 1)
         {
-            Participants = participants, SelfParticipantId = participants[9].ParticipantId, Capacity = 10
+            Participants = participants,
+            SelfParticipantId = participants[9].ParticipantId,
+            Capacity = 10
         };
         var state = AgentState.Project(view, 10_000, new(new(true), ReportKind.Failed, "no-player"));
         using var input = new StreamReader(new MemoryStream());
@@ -48,7 +75,8 @@ public sealed class AgentStateTests
         var self = Guid.NewGuid();
         var view = new ConnectionView(ConnectionStatus.Reconnecting, Role.Leader, Error: "connection-lost")
         {
-            SelfParticipantId = self, Capacity = 10,
+            SelfParticipantId = self,
+            Capacity = 10,
             Participants = [new(self, Role.Leader, false, null)]
         };
         var state = AgentState.Project(view, 10_000, null);

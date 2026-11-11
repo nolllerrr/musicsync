@@ -18,6 +18,9 @@ services:
       Sync__LanIp: 172.30.53.2
       Sync__Port: "5050"
       Sync__TrustedProxy: 172.30.53.3
+      Sync__MaxConnections: "176"
+      Sync__MaxRooms: "16"
+      Sync__MaxParticipantsPerRoom: "10"
       Sync__MaxRoomsPerSource: "${MUSICSYNC_MAX_ROOMS_PER_SOURCE:-4}"
       Sync__MaxRoomCreationsPerSource: "${MUSICSYNC_MAX_ROOM_CREATIONS_PER_SOURCE:-8}"
       Sync__RoomCreationWindowSeconds: "${MUSICSYNC_ROOM_CREATION_WINDOW_SECONDS:-60}"

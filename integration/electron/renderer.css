@@ -161,9 +161,16 @@
 }
 
 #music-sync-together-panel .music-sync-together-member {
+  display: grid;
+  gap: 4px;
   padding: 8px;
   border: 1px solid transparent;
   border-radius: 9px;
+}
+
+#music-sync-together-panel .music-sync-together-member > button {
+  justify-self: start;
+  max-width: 100%;
 }
 
 #music-sync-together-panel .music-sync-together-member[data-self="true"] {

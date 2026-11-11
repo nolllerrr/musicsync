@@ -4,8 +4,7 @@ internal static class RoomMembership
 {
     public static ConnectionView Update(ConnectionView view, ServerMessage message) => view with
     {
-        Participants = message.Room!.Participants.Select(p =>
-            new PublicParticipant(p.ParticipantId, p.Role, p.Connected, p.Report)).ToArray(),
+        Participants = message.Room!.Participants,
         ParticipantId = message.ParticipantId ?? view.ParticipantId,
         SelfParticipantId = message.ParticipantId ?? view.SelfParticipantId,
         Capacity = message.Room.Capacity

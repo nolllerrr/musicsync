@@ -18,6 +18,11 @@
     reconnecting: 'Переподключение…', ended: 'Связь завершена'
   };
   const errors = {
+    'leadership-transfer-pending': 'Сначала дождитесь ответа на текущий запрос.',
+    'leadership-transfer-unavailable': 'Участник временно недоступен для передачи управления.',
+    'leadership-transfer-stale': 'Запрос передачи управления уже недействителен.',
+    'leadership-transfer-expired': 'Время подтверждения истекло.',
+    'leadership-transfer-target-only': 'Подтвердить может только выбранный участник.',
     'invalid-room-code': 'Проверьте код комнаты.',
     'already-in-room': 'Подключение к комнате уже открыто.',
     'instance-in-use': 'Закройте другой MusicSync в этом сеансе Windows.',
@@ -127,15 +132,13 @@
   const swapMessage = element('p');
   const countdown = element('p', { class: 'music-sync-together-subtitle', role: 'timer' });
   const confirm = element('button', { type: 'button', 'data-primary': '' }, 'Подтвердить смену');
-  swapRequest.append(swapMessage, countdown, confirm);
+  const cancelTransfer = element('button', { type: 'button' }, 'Отменить передачу');
+  swapRequest.append(swapMessage, countdown, confirm, cancelTransfer);
   const actions = element('div', { class: 'music-sync-together-actions' });
   const swap = element('button', { type: 'button' }, 'Сменить роли');
-  // Reserved for participant selection when targeted role transfer is available.
-  const transferHint = element('p', { class: 'music-sync-together-subtitle music-sync-together-hint', hidden: '' },
-    'Выбор участника для передачи управления будет доступен позже.');
   const leave = element('button', { type: 'button' }, 'Выйти');
   actions.append(swap, leave);
-  room.append(codeHeading, codeRow, roster, details, playback, swapRequest, transferHint, actions);
+  room.append(codeHeading, codeRow, roster, details, playback, swapRequest, actions);
   panel.append(title, connection, error, enter, room);
   document.body.append(panel);
 
@@ -193,8 +196,10 @@
         const badge = element('span', { class: 'music-sync-together-member-role' });
         const status = element('span', { class: 'music-sync-together-member-status' });
         heading.append(name, badge);
-        root.append(heading, status);
-        row = { root, name, badge, status };
+        const transfer = element('button', { type: 'button' }, 'Передать управление');
+        transfer.addEventListener('click', () => void run(api.transferLeadership, id));
+        root.append(heading, status, transfer);
+        row = { root, name, badge, status, transfer };
         participantRows.set(id, row);
       }
       const self = id === snapshot.selfParticipantId;
@@ -205,6 +210,8 @@
         participant.connected === true ? 'Подключён' : participant.connected === false ? 'Временно отсутствует' : 'Статус неизвестен';
       setText(row.status, status);
       // Updating attributes and text keeps the existing nodes, focus and scroll position.
+      row.transfer.hidden = !snapshot.supportsLeadershipTransfer || snapshot.role !== 'leader' || self || participant.role !== 'listener';
+      row.transfer.disabled = pending || !current || !participant.connected || Boolean(snapshot.transfer);
       row.root.dataset.self = String(self);
       row.root.dataset.leader = String(participant.role === 'leader');
       if (members.children[index] !== row.root) members.insertBefore(row.root, members.children[index] ?? null);
@@ -225,6 +232,9 @@
   function paint() {
     const hasRoom = Boolean(snapshot.code);
     const swapPending = Boolean(snapshot.swap?.requestedBy);
+    const transfer = snapshot.transfer;
+    const transferIncoming = transfer?.targetParticipantId === snapshot.selfParticipantId;
+    const transferOutgoing = transfer?.initiatorParticipantId === snapshot.selfParticipantId;
     const incoming = swapPending && snapshot.swap.requestedBy !== snapshot.role;
     const groupState = Array.isArray(snapshot.participants);
     const canSwap = !groupState && snapshot.status === 'connected' && snapshot.peerConnected && snapshot.swap?.id && !pending;
@@ -255,13 +265,17 @@
     retry.disabled = pending || snapshot.status !== 'connected';
     swap.disabled = !canSwap || swapPending;
     leave.disabled = pending;
-    swapRequest.hidden = groupState || !swapPending;
-    transferHint.hidden = !groupState;
-    setText(swapMessage, incoming ? 'Другой участник предлагает сменить роли.' : 'Запрос отправлен. Ожидание ответа.');
-    const seconds = Math.ceil(Math.max(0, snapshot.swap?.remainingMs ?? 0) / 1000);
+    swap.hidden = groupState;
+    swapRequest.hidden = transfer ? !transferIncoming && !transferOutgoing : groupState || !swapPending;
+    cancelTransfer.hidden = !transfer;
+    cancelTransfer.disabled = pending || snapshot.status !== 'connected';
+    setText(swapMessage, transfer ? transferIncoming ? 'Ведущий предлагает вам управление комнатой.' : 'Запрос отправлен выбранному участнику. Ожидание ответа.' :
+      incoming ? 'Другой участник предлагает сменить роли.' : 'Запрос отправлен. Ожидание ответа.');
+    const seconds = Math.ceil(Math.max(0, transfer?.remainingMs ?? snapshot.swap?.remainingMs ?? 0) / 1000);
     setText(countdown, `Осталось ${seconds} с`);
-    confirm.hidden = !incoming;
-    confirm.disabled = !canSwap || seconds === 0;
+    confirm.hidden = transfer ? !transferIncoming : !incoming;
+    setText(confirm, transfer ? 'Принять управление' : 'Подтвердить смену');
+    confirm.disabled = transfer ? pending || snapshot.status !== 'connected' || seconds === 0 : !canSwap || seconds === 0;
     position();
   }
 
@@ -314,7 +328,9 @@
     void run(api.join, input.value);
   });
   swap.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
-  confirm.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
+  confirm.addEventListener('click', () => void (snapshot.transfer
+    ? run(api.acceptLeadership, snapshot.transfer.id) : run(api.swapRoles, snapshot.swap?.id)));
+  cancelTransfer.addEventListener('click', () => void run(api.cancelLeadership, snapshot.transfer?.id));
   retry.addEventListener('click', () => void run(api.retryPlayback));
   leave.addEventListener('click', () => void run(api.leave));
   copy.addEventListener('click', async () => {

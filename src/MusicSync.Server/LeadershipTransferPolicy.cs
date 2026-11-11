@@ -3,7 +3,7 @@ using MusicSync.Core;
 namespace MusicSync.Server;
 
 /// <summary>
-/// Pure checks for PR 1's registry integration. Call under the registry lock, resolving actorId from
+/// Checks used atomically by RoomRegistry. Call under the registry lock, resolving actorId from
 /// the current server session and leaderId/isConnected from that same room. These checks do not
 /// consume an offer or change roles; validation and commit must share that lock.
 /// </summary>

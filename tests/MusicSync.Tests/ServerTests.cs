@@ -126,13 +126,12 @@ public sealed class ServerTests
         using var group = await Group.OpenAsync(server.Uri, 10);
         for (int i = 0; i < group.Members.Count; i++)
             await group.Members[i].Peer.SendAsync(new(Protocol.Version, "report",
-                Report: new(0, ReportKind.Failed, Detail: new string((char)('А' + i), 350))));
+                Report: new(0, ReportKind.Failed, Detail: new string((char)('a' + i), 64))));
         var reports = await group.Leader.SnapshotAsync(v => v.Participants.All(p => p.Report is not null));
         for (int i = 0; i < group.Members.Count; i++)
-            Assert.AreEqual(new string((char)('А' + i), 350), reports.Participants.Single(p =>
+            Assert.AreEqual(new string((char)('a' + i), 64), reports.Participants.Single(p =>
                 p.ParticipantId == group.Members[i].Welcome.ParticipantId).Report!.Detail);
         byte[] json = JsonSerializer.SerializeToUtf8Bytes(new ServerMessage(Protocol.Version, "snapshot", Room: reports), Protocol.Json);
-        Assert.IsGreaterThan(Protocol.MaxMessageBytes, json.Length);
         Assert.IsLessThanOrEqualTo(Protocol.MaxServerMessageBytes, json.Length);
         using var document = JsonDocument.Parse(json);
         var room = document.RootElement.GetProperty("room");
@@ -330,6 +329,7 @@ public sealed class ServerTests
         {
             Assert.IsTrue(rooms.Handle(leader, new(Protocol.Version, "report",
                 Report: new(0, ReportKind.Applying, Detail: i.ToString())), clock.Now));
+            rooms.FlushReports();
             Drain(leader);
             Assert.IsTrue(fast.Outgoing.TryRead(out var snapshot));
             Assert.AreEqual(i.ToString(), snapshot.Room!.Leader.Report!.Detail);

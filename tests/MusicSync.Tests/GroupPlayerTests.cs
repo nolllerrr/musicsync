@@ -236,13 +236,23 @@ public sealed class GroupPlayerTests
     {
         await using var group = new PlayerGroup(First, Playback.Playing);
         await group.ReadyAsync();
-        group.Broadcast(group.State with { Revision = 2, PositionMs = FakePlayer.DurationMs - 600,
-            ServerTimestamp = group.Now });
+        group.Broadcast(group.State with
+        {
+            Revision = 2,
+            PositionMs = FakePlayer.DurationMs - 600,
+            ServerTimestamp = group.Now
+        });
         await group.PollAsync();
         Assert.IsTrue(group.Clients.Skip(1).All(c => c.Worker.View is
-            { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Reading.Playback: Playback.Paused }));
-        group.Broadcast(group.State with { Revision = 3, Selection = 2, Track = Second,
-            PositionMs = 0, ServerTimestamp = group.Now });
+        { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Reading.Playback: Playback.Paused }));
+        group.Broadcast(group.State with
+        {
+            Revision = 3,
+            Selection = 2,
+            Track = Second,
+            PositionMs = 0,
+            ServerTimestamp = group.Now
+        });
         await group.PollAsync();
         group.AssertApplied(3, Second, Playback.Playing);
     }
@@ -255,7 +265,7 @@ internal sealed class PlayerGroup : IAsyncDisposable
     private readonly PollTime time = new();
     public sealed record Client(ControlledConnection Connection, FakePlayer Player, RoomPlayer Worker);
     public List<Client> Clients { get; } = [];
-    public List<PublicParticipant> Members { get; } = [];
+    public List<Participant> Members { get; } = [];
     public RoomState State { get; private set; }
     public long Now => time.GetUtcNow().ToUnixTimeMilliseconds();
 
@@ -275,9 +285,11 @@ internal sealed class PlayerGroup : IAsyncDisposable
         var id = Guid.NewGuid();
         Members.Add(new(id, role, true, null));
         var connection = new ControlledConnection(new SyncClock(new MonotonicClock(time)));
-        connection.Set(new(ConnectionStatus.Connected, role, new(State, new(true, null), new(true, null)), 1)
+        connection.Set(new(ConnectionStatus.Connected, role, new(State, Members.ToArray(), 10), 1)
         {
-            SelfParticipantId = id, Participants = Members.ToArray(), Capacity = 10
+            SelfParticipantId = id,
+            Participants = Members.ToArray(),
+            Capacity = 10
         });
         var player = factory?.Invoke(() => Now) ?? new FakePlayer(() => Now);
         var worker = new RoomPlayer(player, () => connection, 1200, timeProvider: time);
@@ -292,8 +304,12 @@ internal sealed class PlayerGroup : IAsyncDisposable
         {
             var view = client.Connection.View;
             var role = Members.Single(p => p.ParticipantId == view.SelfParticipantId).Role;
-            client.Connection.Set(view with { Room = view.Room! with { State = state },
-                Role = role, Participants = Members.ToArray() });
+            client.Connection.Set(view with
+            {
+                Room = view.Room! with { State = state },
+                Role = role,
+                Participants = Members.ToArray()
+            });
         }
     }
 
