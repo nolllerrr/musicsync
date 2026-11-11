@@ -87,7 +87,8 @@ public sealed record PlayerReport(long Revision, ReportKind Kind, long? Position
 public sealed record Participant(Guid ParticipantId, Role Role, bool Connected,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] PlayerReport? Report);
 public sealed record RoleSwap(Guid Id, Role? RequestedBy = null, long? ExpiresAt = null);
-public sealed record RoomView(RoomState State, IReadOnlyList<Participant> Participants, int Capacity, RoleSwap? Swap = null)
+public sealed record RoomView(RoomState State, IReadOnlyList<Participant> Participants, int Capacity, RoleSwap? Swap = null,
+    LeadershipTransfer? Transfer = null)
 {
     // Source compatibility for the pair UI and drift calculation until the group client PRs.
     // These projections are never part of the v2 wire contract.
@@ -98,7 +99,8 @@ public sealed record RoomView(RoomState State, IReadOnlyList<Participant> Partic
 }
 
 public sealed record ClientMessage(int Version, string Type, string? Token = null, string? RoomId = null,
-    Guid? Id = null, RoomAction? Action = null, PlayerReport? Report = null, long? Ping = null, Guid? SwapId = null);
+    Guid? Id = null, RoomAction? Action = null, PlayerReport? Report = null, long? Ping = null, Guid? SwapId = null,
+    Guid? TargetParticipantId = null, Guid? TransferId = null);
 
 public sealed record ServerMessage(int Version, string Type, Role? Role = null, RoomView? Room = null,
     Guid? Id = null, string? Error = null, long? Ping = null, long? Received = null, long? Sent = null,
@@ -108,6 +110,7 @@ public static class Protocol
 {
     public const int Version = 2;
     public const string RoleSwapSubProtocol = "musicsync.roleswap";
+    public const string LeadershipTransferSubProtocol = "musicsync.leadership-transfer";
     public const int MaxMessageBytes = 4096;
     public const int MaxServerMessageBytes = 32 * 1024;
     public const long MaxPositionMs = 24 * 60 * 60 * 1000;

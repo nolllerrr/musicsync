@@ -84,6 +84,7 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int capac
             return Error("protocol-version");
         if (!Protocol.IsToken(hello.Token) || hello.Id is not null || hello.Action is not null ||
             hello.Report is not null || hello.Ping is not null || hello.SwapId is not null ||
+            hello.TargetParticipantId is not null || hello.TransferId is not null ||
             (hello.Type == "create" ? hello.RoomId is not null :
                 hello.Type is not ("join" or "resume") || !Protocol.IsCode(hello.RoomId)))
             return Error("invalid-hello");
@@ -148,7 +149,9 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int capac
 
     public bool Handle(RoomPeer peer, ClientMessage message, long received)
     {
+        // Group commands remain unavailable until PR 1's participant/session model is integrated.
         if (message.Version != Protocol.Version || message.Token is not null || message.RoomId is not null ||
+            message.TargetParticipantId is not null || message.TransferId is not null ||
             message.SwapId is not null && message.Type != "swap-roles")
             return false;
         lock (gate)
