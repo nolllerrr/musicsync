@@ -62,5 +62,5 @@ jobs:
           git ls-files -z -- '*.js' '*.cjs' | while IFS= read -r -d '' file; do
             node --check -- "$file"
           done
-      - name: Run Sonata tests
-        run: node --test tests/MusicSync.Tests/SonataPlayer.test.cjs
+      - name: Run JavaScript tests
+        run: node --test tests/MusicSync.Tests/*.test.cjs
