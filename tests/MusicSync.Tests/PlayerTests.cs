@@ -374,6 +374,49 @@ public sealed class PlayerTests
     }
 
     [TestMethod]
+    [DataRow(true)]
+    [DataRow(false)]
+    public async Task RoleSwapDuringLoadOrSeekCannotPublishThePreviousRolesState(bool duringLoad)
+    {
+        await using var server = await LocalServer.StartAsync();
+        await using var host = new RoomConnection(server.Uri, null);
+        await Check.EventuallyAsync(() => host.View.Status == ConnectionStatus.Connected);
+        Assert.IsNull(await host.ActionAsync(ActionKind.Adopt, First, 30_000, Playback.Paused));
+        await using var guest = new RoomConnection(server.Uri, host.View.Room!.State.RoomId);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var mock = new FakePlayer(() => guest.Clock.Now)
+        {
+            HoldFirst = duringLoad ? release.Task : null,
+            HoldSeek = duringLoad ? null : release.Task
+        };
+        await using var worker = new RoomPlayer(mock, () => guest, 1200);
+        try
+        {
+            await Check.EventuallyAsync(() => host.View.Room?.Swap is not null &&
+                (duringLoad ? mock.Loads == 1 : mock.Seeks == 1));
+            var swap = host.View.Room!.Swap!.Id;
+            Assert.IsNull(await host.SwapRolesAsync(swap));
+            Assert.IsNull(await guest.SwapRolesAsync(swap));
+            await Check.EventuallyAsync(() => guest.View.Role == Role.Leader && host.View.Role == Role.Listener);
+            Assert.AreEqual(2L, guest.View.Room!.State.Revision);
+            Assert.AreEqual(30_000L, guest.View.Room.State.PositionMs);
+            Assert.AreEqual(Playback.Paused, guest.View.Room.State.Playback);
+            Assert.IsNull(guest.View.Room.Leader.Report);
+            Assert.IsNull(guest.View.Room.Listener.Report);
+            Assert.AreEqual("leader-only", await host.ActionAsync(ActionKind.Select, Second));
+            Assert.AreEqual("stale-revision", await guest.ActionAsync(ActionKind.Select, Second, expectedRevision: 1));
+            Assert.IsNull(await guest.ActionAsync(ActionKind.Select, Second));
+            release.TrySetResult();
+            await Check.EventuallyAsync(() => guest.View.Room?.Leader.Report is { Kind: ReportKind.Applied, Revision: 3 } &&
+                host.View.Room?.State.Revision == 3);
+            Assert.AreEqual(Second, worker.View.Reading.Track);
+            Assert.AreEqual(Playback.Playing, worker.View.Reading.Playback);
+            Assert.AreEqual(3L, host.View.Room!.State.Revision);
+        }
+        finally { release.TrySetResult(); }
+    }
+
+    [TestMethod]
     public async Task ReconnectingLeaderKeepsNativeChangesMadeWhileOffline()
     {
         await using var server = await LocalServer.StartAsync();
@@ -413,6 +456,7 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public TrackId? Unavailable { get; init; }
     public TrackId? NextOnEnd { get; init; }
     public Task? HoldFirst { get; init; }
+    public Task? HoldSeek { get; init; }
     public Func<FakePlayer, CancellationToken, Task>? BeforeObserve { get; init; }
 
     public void Manual(TrackId selected, long ms, Playback state, bool exact = true)
@@ -481,14 +525,15 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public Task<PlayerReading> PauseForHandoffAsync(CancellationToken token) =>
         SetPlaybackAsync(Playback.Paused, token);
 
-    public Task<PlayerReading> SeekAsync(long positionMs, CancellationToken token)
+    public async Task<PlayerReading> SeekAsync(long positionMs, CancellationToken token)
     {
+        if (Interlocked.Increment(ref seeks) == 1 && HoldSeek is not null)
+            await HoldSeek.WaitAsync(token);
         lock (gate)
         {
-            Interlocked.Increment(ref seeks);
             position = positionMs;
             anchored = now();
-            return Task.FromResult(Read());
+            return Read();
         }
     }
 

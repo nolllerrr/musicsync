@@ -7,7 +7,7 @@ namespace MusicSync.Core;
 public enum ConnectionStatus { Connecting, Connected, Reconnecting, Ended }
 
 public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, RoomView? Room = null,
-    long Generation = 0, string? Error = null);
+    long Generation = 0, string? Error = null, bool SupportsLeadershipTransfer = false);
 
 public sealed class RoomConnection : IAsyncDisposable
 {
@@ -112,7 +112,45 @@ public sealed class RoomConnection : IAsyncDisposable
         finally { actionGate.Release(); }
     }
 
-    private async Task<string?> RequestAsync(string type, long generation, RoomAction? action = null, Guid? swapId = null)
+    public Task<string?> TransferLeadershipAsync(Guid targetParticipantId) =>
+        LeadershipRequestAsync("transfer-leadership", targetParticipantId);
+
+    public Task<string?> AcceptLeadershipAsync(Guid transferId) =>
+        LeadershipRequestAsync("accept-leadership", transferId);
+
+    // Both the initiator (cancel) and the selected listener (decline) use this command.
+    public Task<string?> CancelLeadershipAsync(Guid transferId) =>
+        LeadershipRequestAsync("cancel-leadership", transferId);
+
+    private async Task<string?> LeadershipRequestAsync(string type, Guid value)
+    {
+        await actionGate.WaitAsync();
+        try
+        {
+            var current = View;
+            if (current.Status != ConnectionStatus.Connected || current.Room is null)
+                return "offline";
+            if (!current.SupportsLeadershipTransfer)
+                return "leadership-transfer-unavailable";
+            if (value == Guid.Empty)
+                return "invalid-command";
+            if (type == "transfer-leadership")
+            {
+                if (current.Role != Role.Leader)
+                    return "leader-only";
+                return await RequestAsync(type, current.Generation, targetParticipantId: value);
+            }
+            if (current.Room.Transfer is not { } transfer || transfer.Id != value)
+                return "leadership-transfer-stale";
+            if (transfer.ExpiresAt <= Clock.Now)
+                return "leadership-transfer-expired";
+            return await RequestAsync(type, current.Generation, transferId: value);
+        }
+        finally { actionGate.Release(); }
+    }
+
+    private async Task<string?> RequestAsync(string type, long generation, RoomAction? action = null, Guid? swapId = null,
+        Guid? targetParticipantId = null, Guid? transferId = null)
     {
         var id = Guid.NewGuid();
         var response = new TaskCompletionSource<ServerMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -128,7 +166,8 @@ public sealed class RoomConnection : IAsyncDisposable
         timeout.CancelAfter(TimeSpan.FromSeconds(3));
         try
         {
-            await SendAsync(transport, new(Protocol.Version, type, Id: id, Action: action, SwapId: swapId), timeout.Token);
+            await SendAsync(transport, new(Protocol.Version, type, Id: id, Action: action, SwapId: swapId,
+                TargetParticipantId: targetParticipantId, TransferId: transferId), timeout.Token);
             return (await response.Task.WaitAsync(timeout.Token)).Error;
         }
         catch (Exception ex) when (IsNetworkError(ex)) { return "delivery-unknown"; }
@@ -148,6 +187,7 @@ public sealed class RoomConnection : IAsyncDisposable
             using var transport = new Transport();
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             var socket = transport.Socket;
+            socket.Options.AddSubProtocol(Protocol.LeadershipTransferSubProtocol);
             socket.Options.AddSubProtocol(Protocol.RoleSwapSubProtocol);
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
             if (endpoint.Scheme == "ws")
@@ -202,7 +242,8 @@ public sealed class RoomConnection : IAsyncDisposable
                 lock (gate)
                 {
                     active = transport;
-                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1);
+                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1,
+                        SupportsLeadershipTransfer: socket.SubProtocol == Protocol.LeadershipTransferSubProtocol);
                 }
                 delay = 1;
                 log?.Invoke($"Connected ({role}).");
