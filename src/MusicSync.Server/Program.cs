@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.WebSockets;
 using System.Text.Json;
+using Microsoft.AspNetCore.HttpOverrides;
 using MusicSync.Core;
 using MusicSync.Server;
 
@@ -18,12 +19,21 @@ namespace MusicSync.Server
             int port = builder.Configuration.GetValue("Sync:Port", mode == "Tls" ? 8443 : 5050);
             int maxConnections = builder.Configuration.GetValue("Sync:MaxConnections", 32);
             int maxRooms = builder.Configuration.GetValue("Sync:MaxRooms", 16);
+            int capacity = builder.Configuration.GetValue("Sync:MaxParticipantsPerRoom", 10);
+            int maxRoomsPerSource = builder.Configuration.GetValue("Sync:MaxRoomsPerSource", 4);
+            int maxRoomCreationsPerSource = builder.Configuration.GetValue("Sync:MaxRoomCreationsPerSource", 8);
+            int creationWindowSeconds = builder.Configuration.GetValue("Sync:RoomCreationWindowSeconds", 60);
             int graceSeconds = builder.Configuration.GetValue("Sync:GraceSeconds", 90);
             if (port is < 0 or > 65535 || maxConnections is < 2 or > 256 ||
-                maxRooms is < 1 or > 128 || graceSeconds is < 5 or > 600)
+                maxRooms is < 1 or > 128 || capacity is < 1 or > 10 || graceSeconds is < 5 or > 600 ||
+                maxRoomsPerSource is < 1 or > 128 || maxRoomCreationsPerSource is < 1 or > 128 ||
+                creationWindowSeconds is < 1 or > 3600)
                 throw new InvalidOperationException("Invalid MusicSync limits or port.");
+            // The source quota uses the TCP peer, including when framework auto-forwarding is enabled.
+            builder.Services.PostConfigure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.None);
             var clock = new MonotonicClock();
-            var rooms = new RoomRegistry(clock, maxRooms, TimeSpan.FromSeconds(graceSeconds));
+            var rooms = new RoomRegistry(clock, maxRooms, capacity, TimeSpan.FromSeconds(graceSeconds),
+                maxRoomsPerSource, maxRoomCreationsPerSource, TimeSpan.FromSeconds(creationWindowSeconds));
             var slots = new SemaphoreSlim(maxConnections);
 
             builder.WebHost.ConfigureKestrel(kestrel =>
@@ -92,7 +102,8 @@ namespace MusicSync.Server
                     string? subProtocol = context.WebSockets.WebSocketRequestedProtocols.Contains(Protocol.RoleSwapSubProtocol)
                         ? Protocol.RoleSwapSubProtocol : null;
                     using var socket = await context.WebSockets.AcceptWebSocketAsync(subProtocol);
-                    await ServeAsync(socket, rooms, clock, app.Logger, context.RequestAborted, app.Lifetime.ApplicationStopping);
+                    await ServeAsync(socket, rooms, clock, context.Connection.RemoteIpAddress ?? IPAddress.None,
+                        app.Logger, context.RequestAborted, app.Lifetime.ApplicationStopping);
                 }
                 finally { slots.Release(); }
             });
@@ -101,7 +112,7 @@ namespace MusicSync.Server
             return app;
         }
 
-        private static async Task ServeAsync(WebSocket socket, RoomRegistry rooms, MonotonicClock clock,
+        private static async Task ServeAsync(WebSocket socket, RoomRegistry rooms, MonotonicClock clock, IPAddress source,
             ILogger logger, CancellationToken request, CancellationToken stopping)
         {
             using var peer = new RoomPeer(socket.SubProtocol == Protocol.RoleSwapSubProtocol);
@@ -113,7 +124,7 @@ namespace MusicSync.Server
                 var hello = await Wire.ReceiveAsync<ClientMessage>(socket, TimeSpan.FromSeconds(6), token);
                 if (hello is null)
                     return;
-                var rejection = rooms.Enter(peer, hello);
+                var rejection = rooms.Enter(peer, hello, source);
                 if (rejection is not null)
                 {
                     peer.Send(rejection);

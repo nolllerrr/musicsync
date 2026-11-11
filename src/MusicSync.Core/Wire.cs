@@ -10,7 +10,8 @@ public static class Wire
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         limit.CancelAfter(timeout);
-        var buffer = new byte[Protocol.MaxMessageBytes];
+        var buffer = new byte[typeof(T) == typeof(ServerMessage)
+            ? Protocol.MaxServerMessageBytes : Protocol.MaxMessageBytes];
         int length = 0;
         ValueWebSocketReceiveResult frame;
         do
