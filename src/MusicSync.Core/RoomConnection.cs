@@ -7,7 +7,7 @@ namespace MusicSync.Core;
 public enum ConnectionStatus { Connecting, Connected, Reconnecting, Ended }
 
 public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, RoomView? Room = null,
-    long Generation = 0, string? Error = null);
+    long Generation = 0, string? Error = null, Guid? ParticipantId = null);
 
 public sealed class RoomConnection : IAsyncDisposable
 {
@@ -172,7 +172,8 @@ public sealed class RoomConnection : IAsyncDisposable
                     End(welcome.Error ?? "protocol-error");
                     return;
                 }
-                if (welcome is not { Type: "welcome", Room: not null, Role: not null })
+                if (welcome is not { Type: "welcome", Room: not null, Role: not null, ParticipantId: not null } ||
+                    !welcome.Room.Participants.Any(p => p.ParticipantId == welcome.ParticipantId && p.Role == welcome.Role))
                     throw new InvalidDataException("Expected a room snapshot.");
                 joined = welcome.Room.State.RoomId;
                 var initialRoom = welcome.Room;
@@ -202,7 +203,8 @@ public sealed class RoomConnection : IAsyncDisposable
                 lock (gate)
                 {
                     active = transport;
-                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1);
+                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1,
+                        ParticipantId: welcome.ParticipantId);
                 }
                 delay = 1;
                 log?.Invoke($"Connected ({role}).");

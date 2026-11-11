@@ -19,12 +19,13 @@ namespace MusicSync.Server
             int port = builder.Configuration.GetValue("Sync:Port", mode == "Tls" ? 8443 : 5050);
             int maxConnections = builder.Configuration.GetValue("Sync:MaxConnections", 32);
             int maxRooms = builder.Configuration.GetValue("Sync:MaxRooms", 16);
+            int capacity = builder.Configuration.GetValue("Sync:MaxParticipantsPerRoom", 10);
             int maxRoomsPerSource = builder.Configuration.GetValue("Sync:MaxRoomsPerSource", 4);
             int maxRoomCreationsPerSource = builder.Configuration.GetValue("Sync:MaxRoomCreationsPerSource", 8);
             int roomCreationWindowSeconds = builder.Configuration.GetValue("Sync:RoomCreationWindowSeconds", 60);
             int graceSeconds = builder.Configuration.GetValue("Sync:GraceSeconds", 90);
             if (port is < 0 or > 65535 || maxConnections is < 2 or > 256 ||
-                maxRooms is < 1 or > 128 || maxRoomsPerSource is < 1 or > 128 ||
+                maxRooms is < 1 or > 128 || capacity is < 1 or > 10 || maxRoomsPerSource is < 1 or > 128 ||
                 maxRoomCreationsPerSource is < 1 or > 128 || roomCreationWindowSeconds is < 1 or > 3600 ||
                 graceSeconds is < 5 or > 600)
                 throw new InvalidOperationException("Invalid MusicSync limits or port.");
@@ -36,8 +37,8 @@ namespace MusicSync.Server
             // Keep framework-wide forwarding switches from changing the peer IP before the access check.
             builder.Services.PostConfigure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.None);
             var clock = new MonotonicClock();
-            var rooms = new RoomRegistry(clock, maxRooms, maxRoomsPerSource, maxRoomCreationsPerSource,
-                TimeSpan.FromSeconds(roomCreationWindowSeconds), TimeSpan.FromSeconds(graceSeconds));
+            var rooms = new RoomRegistry(clock, maxRooms, capacity, TimeSpan.FromSeconds(graceSeconds),
+                maxRoomsPerSource, maxRoomCreationsPerSource, TimeSpan.FromSeconds(roomCreationWindowSeconds));
             var slots = new SemaphoreSlim(maxConnections);
 
             builder.WebHost.ConfigureKestrel(kestrel =>

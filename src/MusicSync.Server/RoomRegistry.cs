@@ -14,13 +14,14 @@ internal sealed class RoomPeer(bool supportsRoleSwap) : IDisposable
     public CancellationToken Disconnect => disconnect.Token;
     public bool SupportsRoleSwap { get; } = supportsRoleSwap;
     public string? RoomId { get; set; }
+    public Guid ParticipantId { get; set; }
     public Role Role { get; set; }
     public void Send(ServerMessage message)
     {
         if (!outgoing.Writer.TryWrite(message))
             Stop();
     }
-    public void Stop() => disconnect.Cancel();
+    public void Stop() => _ = disconnect.CancelAsync();
     public bool IsCompleting { get; private set; }
     public void Complete()
     {
@@ -30,45 +31,50 @@ internal sealed class RoomPeer(bool supportsRoleSwap) : IDisposable
     public void Dispose() => disconnect.Dispose();
 }
 
-internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRoomsPerSource,
-    int maxRoomCreationsPerSource, TimeSpan creationWindow, TimeSpan grace)
+internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int capacity, TimeSpan grace,
+    int maxRoomsPerSource, int maxRoomCreationsPerSource, TimeSpan creationWindow)
 {
-    private sealed class Seat(string token)
+    private sealed class Seat(string token, Role role)
     {
         public string Token { get; } = token;
+        public Guid ParticipantId { get; } = Guid.NewGuid();
+        public Role Role { get; set; } = role;
         public RoomPeer? Peer { get; set; }
         public PlayerReport? Report { get; set; }
         public long Expires { get; set; }
-        public Participant Status => new(Peer is not null, Report);
+        public Participant Status => new(ParticipantId, Role, Peer is not null, Report);
     }
 
-    private sealed class Room(string id, Seat leader, IPAddress creator, long now)
+    private sealed class Room(string id, Seat leader, int capacity, IPAddress creator, long now)
     {
         public IPAddress Creator { get; } = creator;
         public RoomState State { get; set; } = new(id, 0, 0, null, Playback.Paused, 0, now, false);
-        public Seat Leader { get; set; } = leader;
-        public Seat? Listener { get; set; }
+        public List<Seat> Seats { get; } = [leader];
+        public Seat Leader => Seats.Single(seat => seat.Role == Role.Leader);
         public RoleSwap? Swap { get; set; }
         public Queue<Guid> Accepted { get; } = new();
-        public RoomView View => new(State, Leader.Status, Listener?.Status ?? new(false, null), Swap);
-        public Seat? GetSeat(Role role) => role == Role.Leader ? Leader : Listener;
+        public RoomView View => new(State, Seats.Select(seat => seat.Status).ToArray(), capacity, Swap);
+        public Seat? GetSeat(Guid participantId) => Seats.Find(seat => seat.ParticipantId == participantId);
 
         public void ResetRoleSwap() =>
-            Swap = Leader.Peer is { SupportsRoleSwap: true } && Listener?.Peer is { SupportsRoleSwap: true }
+            Swap = Seats.Count == 2 && Seats.All(seat => seat.Peer is
+                { SupportsRoleSwap: true, Disconnect.IsCancellationRequested: false })
                 ? new RoleSwap(Guid.NewGuid()) : null;
 
         public void Broadcast()
         {
             var message = new ServerMessage(Protocol.Version, "snapshot", Room: View);
-            Leader.Peer?.Send(message with { Role = Role.Leader });
-            Listener?.Peer?.Send(message with { Role = Role.Listener });
+            foreach (var seat in Seats)
+                seat.Peer?.Send(message with { Role = seat.Role });
         }
     }
 
     private const int RoleSwapWindowMs = 30_000;
     private readonly object gate = new();
     private readonly Dictionary<string, Room> rooms = new();
-    private readonly Dictionary<string, (Room Room, Role Role)> tokens = new();
+    private readonly Dictionary<string, (Room Room, Seat Seat)> tokens = new();
+    // Successful creations only, bounded independently of the number of remote addresses.
+    private const int MaxRecentCreations = 8192;
     private readonly Queue<(IPAddress Source, long CreatedAt)> recentCreations = new();
     private readonly Dictionary<IPAddress, int> creationCounts = new();
 
@@ -82,16 +88,18 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
                 hello.Type is not ("join" or "resume") || !Protocol.IsCode(hello.RoomId)))
             return Error("invalid-hello");
 
+        if (source.IsIPv4MappedToIPv6)
+            source = source.MapToIPv4();
         lock (gate)
         {
             PruneLocked();
             Room room;
-            Role role;
+            Seat seat;
             if (tokens.TryGetValue(hello.Token!, out var existing))
             {
-                (room, role) = existing;
-                if (hello.Type == "create" ? role != Role.Leader :
-                    room.State.RoomId != hello.RoomId || (hello.Type == "join" && role != Role.Listener))
+                (room, seat) = existing;
+                if (hello.Type == "create" ? seat.Role != Role.Leader :
+                    room.State.RoomId != hello.RoomId || (hello.Type == "join" && seat.Role != Role.Listener))
                     return Error("invalid-session");
             }
             else if (hello.Type == "create")
@@ -99,16 +107,16 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
                 if (rooms.Count >= maxRooms)
                     return Error("server-full");
                 int creations = creationCounts.GetValueOrDefault(source);
-                if (creations >= maxRoomCreationsPerSource ||
-                    rooms.Values.Count(room => room.Creator.Equals(source)) >= maxRoomsPerSource)
+                if (creations >= maxRoomCreationsPerSource || recentCreations.Count >= MaxRecentCreations ||
+                    rooms.Values.Count(candidate => candidate.Creator.Equals(source)) >= maxRoomsPerSource)
                     return Error("room-creation-limited");
                 string code;
                 do { code = Protocol.NewCode(); } while (rooms.ContainsKey(code));
-                role = Role.Leader;
+                seat = new Seat(hello.Token!, Role.Leader);
                 long now = clock.Now;
-                room = new Room(code, new Seat(hello.Token!), source, now);
+                room = new Room(code, seat, capacity, source, now);
                 rooms.Add(code, room);
-                tokens.Add(hello.Token!, (room, role));
+                tokens.Add(hello.Token!, (room, seat));
                 recentCreations.Enqueue((source, now));
                 creationCounts[source] = creations + 1;
             }
@@ -117,21 +125,22 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
                 if (hello.Type == "resume" || !rooms.TryGetValue(hello.RoomId!, out var joined))
                     return Error("room-unavailable");
                 room = joined;
-                if (room.Listener is not null)
+                if (room.Seats.Count >= capacity)
                     return Error("room-full");
-                role = Role.Listener;
-                room.Listener = new Seat(hello.Token!);
-                tokens.Add(hello.Token!, (room, role));
+                seat = new Seat(hello.Token!, Role.Listener);
+                room.Seats.Add(seat);
+                tokens.Add(hello.Token!, (room, seat));
             }
 
-            var seat = room.GetSeat(role)!;
             seat.Peer?.Stop();
             seat.Peer = peer;
             seat.Report = null;
             peer.RoomId = room.State.RoomId;
-            peer.Role = role;
+            seat.Expires = 0;
+            peer.Role = seat.Role;
+            peer.ParticipantId = seat.ParticipantId;
             room.ResetRoleSwap();
-            peer.Send(new(Protocol.Version, "welcome", role, room.View));
+            peer.Send(new(Protocol.Version, "welcome", seat.Role, room.View, ParticipantId: seat.ParticipantId));
             room.Broadcast();
             return null;
         }
@@ -144,7 +153,7 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
             return false;
         lock (gate)
         {
-            if (!rooms.TryGetValue(peer.RoomId!, out var room) || room.GetSeat(peer.Role) is not { } seat ||
+            if (!rooms.TryGetValue(peer.RoomId!, out var room) || room.GetSeat(peer.ParticipantId) is not { } seat ||
                 seat.Peer != peer)
                 return false;
             switch (message)
@@ -177,7 +186,7 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
                     else
                     {
                         tokens.Remove(seat.Token);
-                        room.Listener = null;
+                        room.Seats.Remove(seat);
                         room.ResetRoleSwap();
                         room.Broadcast();
                     }
@@ -191,8 +200,11 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
 
     private string? SwapRoles(Room room, RoomPeer peer, Guid swapId)
     {
+        if (room.Seats.Count > 2)
+            return "role-swap-group-unsupported";
+        var listenerSeat = room.Seats.SingleOrDefault(seat => seat.Role == Role.Listener);
         if (room.Leader.Peer is not { Disconnect.IsCancellationRequested: false } leader ||
-            room.Listener?.Peer is not { Disconnect.IsCancellationRequested: false } listener)
+            listenerSeat?.Peer is not { Disconnect.IsCancellationRequested: false } listener)
             return "role-swap-unavailable";
 
         long now = clock.Now;
@@ -211,14 +223,14 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
         }
         else
         {
-            (room.Leader, room.Listener) = (room.Listener, room.Leader);
+            room.Leader.Role = Role.Listener;
+            listenerSeat.Role = Role.Leader;
             leader.Role = Role.Listener;
             listener.Role = Role.Leader;
-            tokens[room.Leader.Token] = (room, Role.Leader);
-            tokens[room.Listener.Token] = (room, Role.Listener);
             // Invalidate in-flight playback commands and reports from the previous roles.
             room.State = room.State with { Revision = room.State.Revision + 1 };
-            room.Leader.Report = room.Listener.Report = null;
+            foreach (var seat in room.Seats)
+                seat.Report = null;
             room.ResetRoleSwap();
         }
         room.Broadcast();
@@ -253,9 +265,8 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
             room.Accepted.Enqueue(id);
             if (room.Accepted.Count > 128)
                 room.Accepted.Dequeue();
-            room.Leader.Report = null;
-            if (room.Listener is not null)
-                room.Listener.Report = null;
+            foreach (var seat in room.Seats)
+                seat.Report = null;
             room.Broadcast();
         }
         peer.Send(new(Protocol.Version, "result", Id: id, Error: error));
@@ -266,7 +277,7 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
         lock (gate)
         {
             if (peer.RoomId is null || !rooms.TryGetValue(peer.RoomId, out var room) ||
-                room.GetSeat(peer.Role) is not { } seat || seat.Peer != peer)
+                room.GetSeat(peer.ParticipantId) is not { } seat || seat.Peer != peer)
                 return;
             seat.Peer = null;
             seat.Report = null;
@@ -295,16 +306,20 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
         {
             if (room.Leader.Peer is null && room.Leader.Expires <= now)
                 Remove(room, "leader-timeout");
-            else if (room.Listener is { Peer: null } listener && listener.Expires <= now)
+            else
             {
-                tokens.Remove(listener.Token);
-                room.Listener = null;
-                room.Broadcast();
-            }
-            else if (room.Swap?.ExpiresAt <= now)
-            {
-                room.ResetRoleSwap();
-                room.Broadcast();
+                var expired = room.Seats.Where(seat => seat.Role == Role.Listener &&
+                    seat.Peer is null && seat.Expires <= now).ToArray();
+                foreach (var seat in expired)
+                {
+                    tokens.Remove(seat.Token);
+                    room.Seats.Remove(seat);
+                }
+                if (expired.Length > 0 || room.Swap?.ExpiresAt <= now)
+                {
+                    room.ResetRoleSwap();
+                    room.Broadcast();
+                }
             }
         }
     }
@@ -312,12 +327,14 @@ internal sealed class RoomRegistry(MonotonicClock clock, int maxRooms, int maxRo
     private void Remove(Room room, string reason)
     {
         rooms.Remove(room.State.RoomId);
-        tokens.Remove(room.Leader.Token);
-        if (room.Listener is { } listener)
+        foreach (var seat in room.Seats)
         {
-            tokens.Remove(listener.Token);
-            listener.Peer?.Send(new(Protocol.Version, "ended", Error: reason));
-            listener.Peer?.Complete();
+            tokens.Remove(seat.Token);
+            if (seat.Role == Role.Listener)
+            {
+                seat.Peer?.Send(new(Protocol.Version, "ended", Error: reason));
+                seat.Peer?.Complete();
+            }
         }
     }
 

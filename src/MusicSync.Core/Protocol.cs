@@ -84,22 +84,32 @@ public sealed record PlayerReport(long Revision, ReportKind Kind, long? Position
             : PositionMs is null && DurationMs is null && SampleTime is null && RttMs is null && Playback is null);
 }
 
-public sealed record Participant(bool Connected,
+public sealed record Participant(Guid ParticipantId, Role Role, bool Connected,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.Never)] PlayerReport? Report);
 public sealed record RoleSwap(Guid Id, Role? RequestedBy = null, long? ExpiresAt = null);
-public sealed record RoomView(RoomState State, Participant Leader, Participant Listener, RoleSwap? Swap = null);
+public sealed record RoomView(RoomState State, IReadOnlyList<Participant> Participants, int Capacity, RoleSwap? Swap = null)
+{
+    // Source compatibility for the pair UI and drift calculation until the group client PRs.
+    // These projections are never part of the v2 wire contract.
+    [JsonIgnore] public Participant Leader => Participants.Single(p => p.Role == Role.Leader);
+    [JsonIgnore] public Participant Listener => Participants.Count == 2
+        ? Participants.Single(p => p.Role == Role.Listener)
+        : new(Guid.Empty, Role.Listener, false, null);
+}
 
 public sealed record ClientMessage(int Version, string Type, string? Token = null, string? RoomId = null,
     Guid? Id = null, RoomAction? Action = null, PlayerReport? Report = null, long? Ping = null, Guid? SwapId = null);
 
 public sealed record ServerMessage(int Version, string Type, Role? Role = null, RoomView? Room = null,
-    Guid? Id = null, string? Error = null, long? Ping = null, long? Received = null, long? Sent = null);
+    Guid? Id = null, string? Error = null, long? Ping = null, long? Received = null, long? Sent = null,
+    Guid? ParticipantId = null);
 
 public static class Protocol
 {
-    public const int Version = 1;
+    public const int Version = 2;
     public const string RoleSwapSubProtocol = "musicsync.roleswap";
     public const int MaxMessageBytes = 4096;
+    public const int MaxServerMessageBytes = 32 * 1024;
     public const long MaxPositionMs = 24 * 60 * 60 * 1000;
     public static readonly TimeSpan Heartbeat = TimeSpan.FromSeconds(2);
     public static readonly TimeSpan ReceiveTimeout = TimeSpan.FromSeconds(12);

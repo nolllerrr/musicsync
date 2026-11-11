@@ -44,11 +44,14 @@ public sealed class PlayerTests
         var state = new RoomState("ROOM", 4, 1, First, Playback.Playing, 20_000, t, false);
         var leader = new PlayerReport(4, ReportKind.Applied, 20_000, 120_000, t, 25, Playback.Playing);
         var guest = new PlayerReport(4, ReportKind.Applied, 20_200, 120_000, t + 500, 30, Playback.Playing);
-        var view = new RoomView(state, new(true, leader), new(true, guest));
+        var view = new RoomView(state,
+            [new(Guid.NewGuid(), Role.Leader, true, leader), new(Guid.NewGuid(), Role.Listener, true, guest)], 10);
         Assert.AreEqual(-300L, SyncClock.Difference(view, t + 2000));
         Assert.IsNull(SyncClock.Difference(view, t + 6000));
-        Assert.IsNull(SyncClock.Difference(view with { Listener = new(true, guest with { Revision = 3 }) }, t + 2000));
-        Assert.IsNull(SyncClock.Difference(view with { Listener = new(true, guest with { RttMs = null }) }, t + 2000));
+        Assert.IsNull(SyncClock.Difference(view with { Participants = [view.Leader,
+            view.Listener with { Report = guest with { Revision = 3 } }] }, t + 2000));
+        Assert.IsNull(SyncClock.Difference(view with { Participants = [view.Leader,
+            view.Listener with { Report = guest with { RttMs = null } }] }, t + 2000));
     }
 
     [TestMethod]
