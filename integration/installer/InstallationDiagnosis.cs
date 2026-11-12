@@ -86,7 +86,7 @@ internal sealed partial class PatchInstallation
                     exe != build.Originals.Exe && exe != receipt.Patched.Exe)
                     return Result(InstallationStatus.HashMismatch,
                         "Файлы заменены, но новая пара SHA-256 пока не проверена. Дождитесь совместимого обновления MusicSync.");
-                return Result(InstallationStatus.Damaged, "Файлы отличаются от журнала и проверенных сборок. Автоматическое восстановление остановлено.");
+                return Result(InstallationStatus.Damaged, "Файлы отличаются от журнала и проверенных сборок. Требуется проверка перед установкой.");
             }
             if (asar is null || exe is null)
                 return Result(InstallationStatus.Missing, "Не найдены файлы Яндекс Музыки.");
@@ -124,23 +124,9 @@ internal sealed partial class PatchInstallation
         build.Version == receipt.Version && (receipt.Originals is null || build.Originals == receipt.Originals) &&
         (receipt.ProductVersion is null || build.ProductVersion == receipt.ProductVersion));
 
-    internal string RunAutomatic(string agentPath)
-    {
-        using var installLock = AcquireLock();
-        CheckPaths();
-        // Diagnose cannot probe our own exclusive lock. All state is checked again by Apply.
-        var stock = FindOriginalBuild();
-        if (stock is null)
-            throw new InvalidOperationException("Автовосстановление разрешено только для точной проверенной исходной пары файлов.");
-        EnsureApplicationIdle();
-        _automatic = true;
-        try { return Apply(install: true, endpoint: null, agent: agentPath, music: null); }
-        finally { _automatic = false; }
-    }
-
     private void EnsureApplicationIdle()
     {
         if (YandexMusicRestart.IsRunning(_root))
-            throw new IOException("Яндекс Музыка работает. Восстановление отложено до её закрытия.");
+            throw new IOException("Не удалось получить доступ к файлам: Яндекс Музыка ещё работает. Закройте её и повторите установку.");
     }
 }

@@ -140,7 +140,9 @@ public sealed class AsarValidationTests
                     ["offset"] = offset.ToString(CultureInfo.InvariantCulture),
                     ["integrity"] = new JsonObject
                     {
-                        ["algorithm"] = "SHA256", ["hash"] = hash, ["blockSize"] = 4194304,
+                        ["algorithm"] = "SHA256",
+                        ["hash"] = hash,
+                        ["blockSize"] = 4194304,
                         ["blocks"] = new JsonArray(JsonValue.Create(hash))
                     }
                 };

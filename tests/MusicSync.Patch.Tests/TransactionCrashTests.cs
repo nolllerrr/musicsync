@@ -41,7 +41,7 @@ public sealed class TransactionCrashTests
         PrepareInterruptedStagedPayload(app, endpoint);
         var updated = app.UpdateToSupportedBuild();
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
         Assert.AreEqual(endpoint, app.Open().ReadInstalledEndpoint());
@@ -64,7 +64,7 @@ public sealed class TransactionCrashTests
         Assert.IsFalse(Directory.Exists(app.Payload));
         Assert.AreEqual(updated.Originals, app.TargetHashes());
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(endpoint, app.Open().ReadInstalledEndpoint());
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
@@ -75,7 +75,7 @@ public sealed class TransactionCrashTests
     [TestMethod]
     [DataRow("AsarReplaced")]
     [DataRow("PairReplaced")]
-    public void AutomaticRecoveryFailureRestoresUpdatedOriginalsAndCanRetryWithoutLosingEndpoint(string checkpointName)
+    public void InstallFailureRestoresUpdatedOriginalsAndCanRetryWithoutLosingEndpoint(string checkpointName)
     {
         using var app = new InstallationFixture();
         var endpoint = new Uri("wss://rollback-preservation.example.test/ws");
@@ -90,7 +90,7 @@ public sealed class TransactionCrashTests
             throw new IOException("Injected interruption after " + checkpointName);
         });
 
-        Assert.ThrowsExactly<IOException>(() => installation.RunAutomatic(app.AgentPath));
+        Assert.ThrowsExactly<IOException>(() => installation.Run(true, endpoint: null, agent: app.AgentPath, music: null));
 
         Assert.IsTrue(reached);
         Assert.AreEqual(updated.Originals, app.TargetHashes());
@@ -100,7 +100,7 @@ public sealed class TransactionCrashTests
         var archive = Directory.GetDirectories(app.History).Single();
         Assert.AreEqual(endpoint, PatchSettings.Read(Path.Combine(archive, "retired-payload", "config.json")));
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
         Assert.AreEqual(endpoint, app.Open().ReadInstalledEndpoint());
@@ -123,7 +123,7 @@ public sealed class TransactionCrashTests
         CollectionAssert.AreEqual(before, app.Snapshot());
         Assert.IsTrue(Directory.Exists(app.State));
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
         Assert.AreEqual(app.Originals, app.BackupHashes());

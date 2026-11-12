@@ -47,7 +47,7 @@ public sealed class RecoveryInstallationTests
             [new SupportedBuild("5.126.1", "0.0.0.0", app.Originals)]);
 
         Assert.AreEqual(InstallationStatus.Unsupported, installation.Diagnose().Status);
-        Assert.Throws<InvalidOperationException>(() => installation.RunAutomatic(app.AgentPath));
+        Assert.Throws<InvalidOperationException>(() => installation.Run(true, endpoint: null, agent: app.AgentPath, music: null));
 
         CollectionAssert.AreEqual(before, app.Snapshot());
     }
@@ -60,7 +60,6 @@ public sealed class RecoveryInstallationTests
         var before = app.Snapshot();
 
         Assert.AreEqual(InstallationStatus.HashMismatch, app.Open().Diagnose().Status);
-        Assert.Throws<InvalidOperationException>(() => app.Open().RunAutomatic(app.AgentPath));
         Assert.Throws<InvalidOperationException>(() => app.Run(true, InstallationFixture.Endpoint));
 
         CollectionAssert.AreEqual(before, app.Snapshot());
@@ -102,14 +101,14 @@ public sealed class RecoveryInstallationTests
     }
 
     [TestMethod]
-    public void AutomaticRepairArchivesOldGenerationAndPreservesEndpoint()
+    public void ReinstallArchivesOldGenerationAndPreservesEndpoint()
     {
         using var app = new InstallationFixture();
         var endpoint = new Uri("wss://rooms.example.test/ws");
         app.Run(true, endpoint);
         var updated = app.UpdateToSupportedBuild();
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
         Assert.AreEqual(endpoint, app.Open().ReadInstalledEndpoint());
@@ -124,16 +123,16 @@ public sealed class RecoveryInstallationTests
     }
 
     [TestMethod]
-    public void RepeatedRecoveryTriggerDoesNotModifyAnAlreadyInstalledPatch()
+    public void RepeatedInstallDoesNotModifyAnAlreadyInstalledPatch()
     {
         using var app = new InstallationFixture();
         Install(app);
         app.UpdateToSupportedBuild();
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
         var before = app.Snapshot();
 
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
-        Assert.Throws<InvalidOperationException>(() => app.Open().RunAutomatic(app.AgentPath));
+        Assert.AreEqual("Патч уже установлен.", app.Run(true));
 
         CollectionAssert.AreEqual(before, app.Snapshot());
     }
@@ -151,7 +150,7 @@ public sealed class RecoveryInstallationTests
         Directory.Move(app.State, Path.Combine(app.History, "interrupted-retirement"));
 
         Assert.AreEqual(InstallationStatus.SupportedOriginal, app.Open().Diagnose().Status);
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(endpoint, app.Open().ReadInstalledEndpoint());
         Assert.AreEqual(updated.Originals, app.BackupHashes());
@@ -168,7 +167,7 @@ public sealed class RecoveryInstallationTests
         var updated = app.UpdateToSupportedBuild();
 
         Assert.AreEqual(InstallationStatus.PatchMissing, app.Open().Diagnose().Status);
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
 
         Assert.AreEqual(updated.Originals, app.BackupHashes());
         app.Run(false);
@@ -176,7 +175,7 @@ public sealed class RecoveryInstallationTests
     }
 
     [TestMethod]
-    public void UnknownUpdateWithOldJournalIsPreservedWithoutAutomaticRollback()
+    public void UnknownUpdateWithOldJournalIsPreservedWithoutRollback()
     {
         using var app = new InstallationFixture();
         Install(app);
@@ -187,7 +186,7 @@ public sealed class RecoveryInstallationTests
         var diagnosis = app.Open().Diagnose();
         Assert.IsFalse(diagnosis.CanRepair);
         Assert.AreEqual(InstallationStatus.HashMismatch, diagnosis.Status);
-        Assert.Throws<InvalidOperationException>(() => app.Open().RunAutomatic(app.AgentPath));
+        Assert.Throws<InvalidOperationException>(() => app.Run(true));
         Assert.Throws<InvalidOperationException>(() => app.Run(false));
 
         CollectionAssert.AreEqual(before, app.Snapshot());
@@ -241,7 +240,7 @@ public sealed class RecoveryInstallationTests
 
         var diagnosis = app.Open().Diagnose();
         Assert.IsFalse(diagnosis.CanRepair);
-        Assert.Throws<IOException>(() => app.Open().RunAutomatic(app.AgentPath));
+        Assert.Throws<IOException>(() => app.Run(true));
 
         Assert.AreEqual("preserve me", File.ReadAllText(unknown));
         CollectionAssert.AreEqual(before, app.Snapshot());
@@ -259,12 +258,12 @@ public sealed class RecoveryInstallationTests
 
         Assert.AreEqual(InstallationStatus.Interrupted, diagnosis.Status);
         Assert.IsFalse(diagnosis.CanRepair);
-        Assert.Throws<InvalidOperationException>(() => app.Open().RunAutomatic(app.AgentPath));
+        Assert.Throws<InvalidOperationException>(() => app.Run(true));
         CollectionAssert.AreEqual(before, app.Snapshot());
     }
 
     [TestMethod]
-    public void ConcurrentInstallerLockBlocksDiagnosisAndAutomaticRepairWithoutChanges()
+    public void ConcurrentInstallerLockBlocksDiagnosisAndInstallWithoutChanges()
     {
         using var app = new InstallationFixture();
         var lockPath = Path.Combine(app.Root, ".musicsync-together.lock");
@@ -273,7 +272,7 @@ public sealed class RecoveryInstallationTests
         var before = app.TargetHashes();
 
         Assert.AreEqual(InstallationStatus.Busy, app.Open().Diagnose().Status);
-        Assert.Throws<IOException>(() => app.Open().RunAutomatic(app.AgentPath));
+        Assert.Throws<IOException>(() => app.Run(true));
 
         Assert.AreEqual(before, app.TargetHashes());
         Assert.IsFalse(Directory.Exists(app.State));
@@ -287,11 +286,11 @@ public sealed class RecoveryInstallationTests
         var updated = app.UpdateToSupportedBuild();
         using (var held = File.Open(app.Exe, FileMode.Open, FileAccess.Read, FileShare.Read))
         {
-            Assert.Throws<IOException>(() => app.Open().RunAutomatic(app.AgentPath));
+            Assert.Throws<IOException>(() => app.Run(true));
             Assert.AreEqual(updated.Originals, app.TargetHashes());
         }
 
-        app.Open().RunAutomatic(app.AgentPath);
+        app.Run(true);
         Assert.AreEqual(InstallationStatus.Installed, app.Open().Diagnose().Status);
         app.Run(false);
         Assert.AreEqual(updated.Originals, app.TargetHashes());
@@ -307,7 +306,7 @@ public sealed class RecoveryInstallationTests
         using (var held = File.Open(app.Asar, FileMode.Open, FileAccess.Read, FileShare.None))
         {
             Assert.IsFalse(app.Open().Diagnose().CanRepair);
-            Assert.Throws<IOException>(() => app.Open().RunAutomatic(app.AgentPath));
+            Assert.Throws<IOException>(() => app.Run(true));
         }
         CollectionAssert.AreEqual(before, app.Snapshot());
         Assert.AreEqual(InstallationFixture.Endpoint, app.Open().ReadInstalledEndpoint());
@@ -357,7 +356,7 @@ public sealed class RecoveryInstallationTests
             var installation = new PatchInstallation(alias, app.Builds);
 
             Assert.AreEqual(InstallationStatus.Unsafe, installation.Diagnose().Status);
-            Assert.Throws<IOException>(() => installation.RunAutomatic(app.AgentPath));
+            Assert.Throws<IOException>(() => installation.Run(true, endpoint: null, agent: app.AgentPath, music: null));
 
             CollectionAssert.AreEqual(before, app.Snapshot());
         }
@@ -377,7 +376,7 @@ public sealed class RecoveryInstallationTests
             var installation = new PatchInstallation(Path.Combine(alias, "YandexMusic"), app.Builds);
 
             Assert.AreEqual(InstallationStatus.Unsafe, installation.Diagnose().Status);
-            Assert.Throws<IOException>(() => installation.RunAutomatic(app.AgentPath));
+            Assert.Throws<IOException>(() => installation.Run(true, endpoint: null, agent: app.AgentPath, music: null));
 
             CollectionAssert.AreEqual(before, app.Snapshot());
         }

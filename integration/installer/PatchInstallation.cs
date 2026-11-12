@@ -24,12 +24,13 @@ internal sealed partial class PatchInstallation
     private SupportedBuild _activeBuild;
     private Pair _originals => _activeBuild.Originals;
     internal string Root => _root;
-    private bool _automatic;
 
     internal PatchInstallation(string root) : this(root, SupportedBuild.Catalog) { }
 
-    internal PatchInstallation(string root, Pair originals) : this(root,
-        [new SupportedBuild("5.126.1", "5.126.1.0", originals)]) { }
+    internal PatchInstallation(string root, Pair originals) :
+        this(root,
+        [new SupportedBuild("5.126.1", "5.126.1.0", originals)])
+    { }
 
     internal PatchInstallation(string root, IReadOnlyList<SupportedBuild> builds, Action<InstallCheckpoint>? checkpoint = null)
     {
@@ -304,19 +305,15 @@ internal sealed partial class PatchInstallation
             var prepared = new Receipt(_activeBuild.Version, HashPair(patchedAsar, patchedExe), agentHash, configHash,
                 bundleHash, Phase.Installing, Originals: _originals, ProductVersion: _activeBuild.ProductVersion);
             VerifyPayload(stagedPayload, prepared, allowMissing: false);
-            if (_automatic) EnsureApplicationIdle();
             music?.Close();
-            if (_automatic)
-            {
-                applicationGuard = GuardExecutable(_exe);
-                EnsureApplicationIdle();
-            }
+            applicationGuard = GuardExecutable(_exe);
+            EnsureApplicationIdle();
             if (HashPair(_asar, _exe) != _originals)
                 throw new IOException("The application changed while preparing the patch.");
             WriteReceipt(prepared);
             receipt = prepared;
             Directory.Move(stagedPayload, _payload);
-            if (_automatic) EnsureApplicationIdle();
+            EnsureApplicationIdle();
             ReplaceIfMatching(patchedAsar, _asar, _originals.Asar, receipt.Patched.Asar);
             _checkpoint?.Invoke(InstallCheckpoint.AsarReplaced);
             ReplaceIfMatching(patchedExe, _exe, _originals.Exe, receipt.Patched.Exe);
@@ -340,7 +337,7 @@ internal sealed partial class PatchInstallation
                     // After the final rename the complete patched pair may already be running.
                     // Acquire a writable image handle before rolling it back; if that fails,
                     // leave the owned pair and journal for explicit recovery, without closing it.
-                    using var rollbackGuard = _automatic && HashIfPresent(_exe) == receipt.Patched.Exe
+                    using var rollbackGuard = HashIfPresent(_exe) == receipt.Patched.Exe
                         ? GuardExecutable(_exe) : null;
                     RestoreOriginals(receipt, music);
                 }
