@@ -12,6 +12,7 @@ internal partial class PatchWindow : Window
     private readonly PatchInstallation _installation;
     private readonly CancellationTokenSource _windowLifetime = new();
     private Task<InstallerRelease?>? _updateCheck;
+    private bool _updatingRecovery = true;
 
     internal PatchWindow(PatchInstallation installation)
     {
@@ -31,7 +32,111 @@ internal partial class PatchWindow : Window
     private async void CheckUpdatesOnLoad(object sender, RoutedEventArgs e)
     {
         Loaded -= CheckUpdatesOnLoad;
-        await CheckUpdatesAsync(interactive: false);
+        Controls.IsEnabled = false;
+        try
+        {
+            await Task.WhenAll(RefreshDiagnosisAsync(), CheckUpdatesAsync(interactive: false));
+            if (AutomaticRecovery.IsChecked == true)
+            {
+                var warning = await Task.Run(() => RefreshRecoveryWorker(true, _installation.Root, ""));
+                if (warning.Length != 0)
+                    SetNotice(warning);
+            }
+        }
+        finally
+        {
+            Controls.IsEnabled = true;
+        }
+    }
+
+    private async void CheckCompatibility_Click(object sender, RoutedEventArgs e)
+    {
+        Controls.IsEnabled = false;
+        SetNotice("Проверяем совместимость…");
+        try
+        {
+            await RefreshDiagnosisAsync();
+            SetNotice(CompatibilityMessage.Text);
+        }
+        finally
+        {
+            Controls.IsEnabled = true;
+        }
+    }
+
+    private async Task RefreshDiagnosisAsync()
+    {
+        try
+        {
+            var diagnosis = await Task.Run(_installation.Diagnose);
+            MusicVersion.Text = $"Версия: {diagnosis.ProductVersion ?? "не определена"}" +
+                (diagnosis.PackageVersion is { } package ? $" · ASAR {package}" : "");
+            PatchState.Text = "Патч: " + (diagnosis.Status switch
+            {
+                InstallationStatus.Installed => "установлен",
+                InstallationStatus.PatchMissing => "заменён обновлением Яндекс Музыки",
+                InstallationStatus.Interrupted => "операция не завершена",
+                InstallationStatus.Damaged => "требует проверки",
+                InstallationStatus.Missing or InstallationStatus.SupportedOriginal => "не установлен",
+                _ => "состояние не подтверждено"
+            });
+            CompatibilityState.Text = "Совместимость: " + (diagnosis.Status switch
+            {
+                InstallationStatus.Installed or InstallationStatus.SupportedOriginal or InstallationStatus.PatchMissing
+                    => "проверенная сборка",
+                InstallationStatus.Unsupported => "пока не поддерживается",
+                InstallationStatus.HashMismatch => "контрольные суммы не совпали",
+                InstallationStatus.Missing => "Яндекс Музыка не найдена",
+                InstallationStatus.Busy => "дождитесь окончания другой операции",
+                _ => "нужна проверка"
+            });
+            CompatibilityMessage.Text = diagnosis.Message;
+            RepairButton.IsEnabled = diagnosis.CanRepair;
+            InstallButton.IsEnabled = diagnosis.CanRepair || diagnosis.Status == InstallationStatus.Installed;
+            UIElementAutomationPeer.FromElement(CompatibilityMessage)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
+        }
+        catch (Exception error)
+        {
+            MusicVersion.Text = "Версия: не определена";
+            PatchState.Text = "Патч: состояние не подтверждено";
+            CompatibilityState.Text = "Совместимость: проверка не завершена";
+            CompatibilityMessage.Text = error.Message;
+            RepairButton.IsEnabled = false;
+            InstallButton.IsEnabled = false;
+        }
+
+        _updatingRecovery = true;
+        try
+        {
+            AutomaticRecovery.IsChecked = await Task.Run(() => AutoRecovery.IsEnabled(_installation.Root));
+        }
+        catch (Exception error)
+        {
+            AutomaticRecovery.IsChecked = false;
+            SetNotice($"Не удалось прочитать настройку автоматического восстановления. {error.Message}");
+        }
+        finally
+        {
+            _updatingRecovery = false;
+        }
+    }
+
+    private async void AutomaticRecovery_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_updatingRecovery)
+            return;
+
+        var enabled = AutomaticRecovery.IsChecked == true;
+        await RunAsync(enabled ? "Включаем автоматическое восстановление…" : "Отключаем автоматическое восстановление…", () =>
+        {
+            if (enabled)
+                AutoRecovery.Enable(_installation.Root);
+            else
+                AutoRecovery.Disable(_installation.Root);
+            return enabled
+                ? "Автоматическое восстановление включено. Яндекс Музыка будет проверяться после обновлений без принудительного закрытия."
+                : "Автоматическое восстановление отключено.";
+        });
     }
 
     private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
@@ -71,7 +176,7 @@ internal partial class PatchWindow : Window
 
         UpdateBadge.Visibility = release is null ? Visibility.Collapsed : Visibility.Visible;
         var buttonLabel = release is null
-            ? "Проверить обновления"
+            ? "Проверить обновления MusicSync"
             : $"Доступно обновление MusicSync {release.Version}";
         UpdateButton.ToolTip = buttonLabel;
         AutomationProperties.SetName(UpdateButton, buttonLabel);
@@ -114,16 +219,36 @@ internal partial class PatchWindow : Window
     private async void Install_Click(object sender, RoutedEventArgs e)
     {
         var address = Endpoint.Text;
+        var automaticRecovery = AutomaticRecovery.IsChecked == true;
         await RunAsync("Устанавливаем патч…", () =>
         {
             var endpoint = PatchSettings.Parse(address);
             var result = _installation.Run(install: true, endpoint);
-            return SavePreference(endpoint, result);
+            return RefreshRecoveryWorker(automaticRecovery, _installation.Root, SavePreference(endpoint, result));
+        });
+    }
+
+    private async void Repair_Click(object sender, RoutedEventArgs e)
+    {
+        var address = Endpoint.Text;
+        var automaticRecovery = AutomaticRecovery.IsChecked == true;
+        await RunAsync("Восстанавливаем патч…", () =>
+        {
+            var diagnosis = _installation.Diagnose();
+            if (!diagnosis.CanRepair)
+                throw new InvalidOperationException(diagnosis.Message);
+            var endpoint = PatchSettings.Parse(address);
+            return RefreshRecoveryWorker(automaticRecovery, _installation.Root,
+                SavePreference(endpoint, _installation.Run(install: true, endpoint)));
         });
     }
 
     private async void Uninstall_Click(object sender, RoutedEventArgs e) =>
-        await RunAsync("Удаляем патч…", () => _installation.Run(install: false, endpoint: null));
+        await RunAsync("Удаляем патч…", () =>
+        {
+            AutoRecovery.Disable(_installation.Root);
+            return _installation.Run(install: false, endpoint: null);
+        });
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
@@ -154,6 +279,22 @@ internal partial class PatchWindow : Window
         }
     }
 
+    private static string RefreshRecoveryWorker(bool enabled, string root, string result)
+    {
+        if (!enabled)
+            return result;
+        try
+        {
+            // A newer MusicSync installer also updates the opted-in worker's compatibility catalog.
+            AutoRecovery.Enable(root);
+            return result;
+        }
+        catch (Exception error)
+        {
+            return $"{result} Не удалось обновить автоматическое восстановление. {error.Message}".Trim();
+        }
+    }
+
     private async Task RunAsync(string progress, Func<string> action)
     {
         Controls.IsEnabled = false;
@@ -168,6 +309,7 @@ internal partial class PatchWindow : Window
         }
         finally
         {
+            await RefreshDiagnosisAsync();
             Controls.IsEnabled = true;
         }
     }
