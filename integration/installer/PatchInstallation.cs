@@ -20,6 +20,7 @@ internal sealed partial class PatchInstallation
     private readonly string _exe;
     private readonly string _payload;
     private readonly IReadOnlyList<SupportedBuild> _builds;
+    private readonly Action<InstallCheckpoint>? _checkpoint;
     private SupportedBuild _activeBuild;
     private Pair _originals => _activeBuild.Originals;
     internal string Root => _root;
@@ -30,11 +31,12 @@ internal sealed partial class PatchInstallation
     internal PatchInstallation(string root, Pair originals) : this(root,
         [new SupportedBuild("5.126.1", "5.126.1.0", originals)]) { }
 
-    internal PatchInstallation(string root, IReadOnlyList<SupportedBuild> builds)
+    internal PatchInstallation(string root, IReadOnlyList<SupportedBuild> builds, Action<InstallCheckpoint>? checkpoint = null)
     {
         _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
         root = _root;
         _builds = builds;
+        _checkpoint = checkpoint;
         _activeBuild = builds.First();
         _resources = Path.Combine(root, "resources");
         _state = Path.Combine(root, ".musicsync-together");
@@ -81,8 +83,10 @@ internal sealed partial class PatchInstallation
         // An official update owns its new files, even when an old journal says Installing.
         // Recognize the complete new pair before considering rollback of the old transaction.
         var stock = FindOriginalBuild();
-        if (receipt is not null && stock is not null &&
-            (stock != ReceiptBuild(receipt) || receipt.Phase == Phase.Installed))
+        if (receipt is null && stock is not null && Directory.Exists(_state) &&
+            !Directory.EnumerateFileSystemEntries(_state).Any())
+            Directory.Delete(_state); // Last cleanup step was interrupted; there are no files to discard.
+        if (receipt is not null && stock is not null)
         {
             ValidateOriginalStructure(stock);
             endpoint ??= ReadVerifiedEndpoint(receipt);
@@ -276,6 +280,7 @@ internal sealed partial class PatchInstallation
     {
         Directory.CreateDirectory(_state);
         Receipt? receipt = null;
+        FileStream? applicationGuard = null;
         try
         {
             var originalAsar = StatePath("original.asar");
@@ -301,6 +306,11 @@ internal sealed partial class PatchInstallation
             VerifyPayload(stagedPayload, prepared, allowMissing: false);
             if (_automatic) EnsureApplicationIdle();
             music?.Close();
+            if (_automatic)
+            {
+                applicationGuard = GuardExecutable(_exe);
+                EnsureApplicationIdle();
+            }
             if (HashPair(_asar, _exe) != _originals)
                 throw new IOException("The application changed while preparing the patch.");
             WriteReceipt(prepared);
@@ -308,7 +318,9 @@ internal sealed partial class PatchInstallation
             Directory.Move(stagedPayload, _payload);
             if (_automatic) EnsureApplicationIdle();
             ReplaceIfMatching(patchedAsar, _asar, _originals.Asar, receipt.Patched.Asar);
+            _checkpoint?.Invoke(InstallCheckpoint.AsarReplaced);
             ReplaceIfMatching(patchedExe, _exe, _originals.Exe, receipt.Patched.Exe);
+            _checkpoint?.Invoke(InstallCheckpoint.PairReplaced);
             if (HashPair(_asar, _exe) != receipt.Patched)
             {
                 throw new IOException("Patched file verification failed.");
@@ -325,6 +337,11 @@ internal sealed partial class PatchInstallation
                 }
                 else
                 {
+                    // After the final rename the complete patched pair may already be running.
+                    // Acquire a writable image handle before rolling it back; if that fails,
+                    // leave the owned pair and journal for explicit recovery, without closing it.
+                    using var rollbackGuard = _automatic && HashIfPresent(_exe) == receipt.Patched.Exe
+                        ? GuardExecutable(_exe) : null;
                     RestoreOriginals(receipt, music);
                 }
             }
@@ -335,6 +352,7 @@ internal sealed partial class PatchInstallation
             }
             throw new IOException($"Installation failed. The original files were preserved or restored. {error.Message}", error);
         }
+        finally { applicationGuard?.Dispose(); }
     }
 
     private void RestoreOriginals(Receipt receipt, YandexMusicRestart? music)
@@ -564,8 +582,15 @@ internal sealed partial class PatchInstallation
 
     private static string Hash(string path)
     {
-        using var file = File.OpenRead(path);
+        // A read-compatible writable image guard prevents CreateProcess during the two-file commit.
+        using var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         return Convert.ToHexString(SHA256.HashData(file));
+    }
+
+    internal static FileStream GuardExecutable(string path)
+    {
+        CheckPath(path);
+        return File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read | FileShare.Delete);
     }
 
     private static string Hash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content));
@@ -573,6 +598,7 @@ internal sealed partial class PatchInstallation
     private static bool IsHash(string? value) => value?.Length == 64 && value.All(Uri.IsHexDigit);
 
     internal readonly record struct Pair(string Asar, string Exe);
+    internal enum InstallCheckpoint { AsarReplaced, PairReplaced }
     private sealed record Receipt(string Version, Pair Patched, string AgentHash, string ConfigHash, string BundleHash,
         Phase Phase, string? SettingsHash = null, string? PendingSettingsHash = null,
         Pair? Originals = null, string? ProductVersion = null);

@@ -186,7 +186,7 @@ public sealed class RecoveryInstallationTests
 
         var diagnosis = app.Open().Diagnose();
         Assert.IsFalse(diagnosis.CanRepair);
-        Assert.AreEqual(InstallationStatus.Damaged, diagnosis.Status);
+        Assert.AreEqual(InstallationStatus.HashMismatch, diagnosis.Status);
         Assert.Throws<InvalidOperationException>(() => app.Open().RunAutomatic(app.AgentPath));
         Assert.Throws<InvalidOperationException>(() => app.Run(false));
 

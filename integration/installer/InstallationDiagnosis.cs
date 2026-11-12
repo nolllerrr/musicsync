@@ -25,11 +25,16 @@ internal sealed partial class PatchInstallation
                 catch (IOException) { return Result(InstallationStatus.Busy, "Другая операция MusicSync ещё выполняется."); }
             }
 
-            var receipt = ReadReceipt();
             var asar = HashIfPresent(_asar);
             var exe = HashIfPresent(_exe);
             product = exe is not null ? FileVersionInfo.GetVersionInfo(_exe).ProductVersion : null;
             fingerprint = Hash(Encoding.UTF8.GetBytes($"{product}|{asar}|{exe}"));
+            if (asar is not null)
+            {
+                try { package = AsarPatch.Inspect(_asar).Version; }
+                catch (Exception error) when (error is IOException or JsonException or InvalidOperationException or ArgumentException) { }
+            }
+            var receipt = ReadReceipt();
             var current = new Pair(asar ?? "", exe ?? "");
             var stock = _builds.SingleOrDefault(build => build.Originals == current && build.ProductVersion == product);
 
@@ -41,10 +46,14 @@ internal sealed partial class PatchInstallation
                 {
                     VerifyPayload(_payload, receipt, allowMissing: true);
                     VerifyPayload(StatePath("retired-payload"), receipt, allowMissing: true);
+                    VerifyPayload(StatePath(PayloadName), receipt, allowMissing: true);
+                    if (stock == ReceiptBuild(receipt) && receipt.Phase is Phase.Installing or Phase.Removing)
+                        return Result(InstallationStatus.Interrupted,
+                            "Операция прервана; точные исходные файлы целы. Можно безопасно завершить восстановление.", true);
                     return Result(InstallationStatus.PatchMissing,
                         "Официальные файлы восстановлены или обновлены. Патч отсутствует; сборка поддерживается.", true);
                 }
-                if (Directory.Exists(_state))
+                if (Directory.Exists(_state) && Directory.EnumerateFileSystemEntries(_state).Any())
                     return Result(InstallationStatus.Interrupted, "Найдена подготовка установки без журнала. Требуется проверка вручную.");
                 if (Directory.Exists(_payload) || File.Exists(_payload))
                     return Result(InstallationStatus.Damaged, "Найден компонент MusicSync без журнала. Файлы сохранены; требуется проверка вручную.");
@@ -72,6 +81,11 @@ internal sealed partial class PatchInstallation
                 // A new official version is not corruption of the previous patch.
                 if (product is not null && !_builds.Any(item => item.ProductVersion == product))
                     return Result(InstallationStatus.Unsupported, "Яндекс Музыка обновилась. Эта сборка пока не поддерживается; дождитесь обновления MusicSync.");
+                if (asar is not null && exe is not null &&
+                    asar != build.Originals.Asar && asar != receipt.Patched.Asar &&
+                    exe != build.Originals.Exe && exe != receipt.Patched.Exe)
+                    return Result(InstallationStatus.HashMismatch,
+                        "Файлы заменены, но новая пара SHA-256 пока не проверена. Дождитесь совместимого обновления MusicSync.");
                 return Result(InstallationStatus.Damaged, "Файлы отличаются от журнала и проверенных сборок. Автоматическое восстановление остановлено.");
             }
             if (asar is null || exe is null)

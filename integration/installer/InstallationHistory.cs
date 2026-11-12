@@ -7,7 +7,7 @@ internal sealed partial class PatchInstallation
 
     private Uri? ReadVerifiedEndpoint(Receipt receipt)
     {
-        foreach (var directory in new[] { _payload, StatePath("retired-payload") })
+        foreach (var directory in new[] { _payload, StatePath("retired-payload"), StatePath(PayloadName) })
         {
             VerifyPayload(directory, receipt, allowMissing: true);
             var config = Path.Combine(directory, ConfigName);
@@ -50,10 +50,13 @@ internal sealed partial class PatchInstallation
             Receipt receipt;
             try { receipt = ReadReceiptFile(receiptPath); }
             catch (Exception error) when (error is JsonException or InvalidDataException) { continue; }
-            var payload = Path.Combine(directory, "retired-payload");
-            VerifyPayload(payload, receipt, allowMissing: true);
-            var config = Path.Combine(payload, ConfigName);
-            if (File.Exists(config)) return PatchSettings.Read(config);
+            foreach (var name in new[] { "retired-payload", PayloadName })
+            {
+                var payload = Path.Combine(directory, name);
+                VerifyPayload(payload, receipt, allowMissing: true);
+                var config = Path.Combine(payload, ConfigName);
+                if (File.Exists(config)) return PatchSettings.Read(config);
+            }
         }
         return null;
     }
