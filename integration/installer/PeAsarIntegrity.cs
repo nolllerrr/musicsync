@@ -9,6 +9,12 @@ internal static class PeAsarIntegrity
     private const uint DirectoryFlag = 0x80000000;
     private const uint OffsetMask = 0x7fffffff;
 
+    internal static void Validate(string path, string headerHash)
+    {
+        using var file = File.OpenRead(path);
+        GetHashOffset(file, headerHash);
+    }
+
     internal static void Build(string original, string destination, string originalHash, string patchedHash)
     {
         File.Copy(original, destination);
