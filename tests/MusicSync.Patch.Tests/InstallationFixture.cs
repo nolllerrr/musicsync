@@ -22,6 +22,7 @@ internal sealed class InstallationFixture : IDisposable
             Directory.CreateDirectory(Path.Combine(Root, "resources"));
             WriteApplication(preload: "// original preload");
             Originals = TargetHashes();
+            Builds.Add(new SupportedBuild("5.126.1", "5.126.1.0", Originals));
             _agent = Path.Combine(_temporary, "agent.exe");
             File.WriteAllText(_agent, "Fixture agent payload");
         }
@@ -32,15 +33,19 @@ internal sealed class InstallationFixture : IDisposable
         }
     }
 
-    private string Root => Path.Combine(_temporary, "YandexMusic");
+    internal string Root => Path.Combine(_temporary, "YandexMusic");
+    internal string AgentPath => _agent;
     internal string Asar => Path.Combine(Root, "resources", "app.asar");
     internal string Exe => Path.Combine(Root, "Яндекс Музыка.exe");
     internal string Payload => Path.Combine(Root, "resources", "musicsync-together");
     internal string State => Path.Combine(Root, ".musicsync-together");
     internal string Receipt => Path.Combine(State, "receipt.json");
+    internal string History => Path.Combine(Root, ".musicsync-together-history");
     internal PatchInstallation.Pair Originals { get; }
+    // These are deliberately synthetic fixture identities, never certification of a shipped application.
+    internal List<SupportedBuild> Builds { get; } = [];
 
-    internal PatchInstallation Open() => new(Root, Originals);
+    internal PatchInstallation Open() => new(Root, Builds);
 
     internal string Run(bool install, Uri? endpoint = null) =>
         Open().Run(install, endpoint, agent: install ? _agent : null, music: null);
@@ -73,11 +78,19 @@ internal sealed class InstallationFixture : IDisposable
 
     internal void ReplaceWithUpdatedApplication() => WriteApplication(preload: "// externally updated preload");
 
+    internal SupportedBuild UpdateToSupportedBuild(string version = "5.127.0", string preload = "// supported fixture update")
+    {
+        WriteApplication(preload, version);
+        var build = new SupportedBuild(version, "5.126.1.0", TargetHashes());
+        Builds.Add(build);
+        return build;
+    }
+
     public void Dispose() => Directory.Delete(_temporary, recursive: true);
 
-    private void WriteApplication(string preload)
+    internal void WriteApplication(string preload, string version = "5.126.1")
     {
-        var headerHash = WriteAsar(Asar, preload);
+        var headerHash = WriteAsar(Asar, preload, version);
         File.Copy(typeof(InstallationFixture).Assembly.Location, Exe, overwrite: true);
         var integrity = JsonSerializer.SerializeToUtf8Bytes(new[]
         {
@@ -102,11 +115,11 @@ internal sealed class InstallationFixture : IDisposable
         }
     }
 
-    private static string WriteAsar(string path, string preload)
+    private static string WriteAsar(string path, string preload, string version)
     {
         (string Name, byte[] Bytes)[] entries =
         [
-            ("package.json", """{"version":"5.126.1","main":"./index.js"}"""u8.ToArray()),
+            ("package.json", JsonSerializer.SerializeToUtf8Bytes(new { version, main = "./index.js" })),
             ("index.js", "// fixture entry point"u8.ToArray()),
             ("preload.js", Encoding.UTF8.GetBytes(preload))
         ];

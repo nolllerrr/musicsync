@@ -14,7 +14,24 @@ internal static class AsarPatch
     internal static readonly string[] AddedFiles = ["bootstrap.cjs", "main.cjs", "renderer.js", "renderer.css"];
     internal const string PreloadName = "preload.cjs";
 
-    internal static (string Original, string Patched) Build(string sourcePath, string destinationPath)
+    internal sealed record Info(string Version, string Main, string HeaderHash);
+
+    // This verifies the injection boundary only. Compatibility still requires an allowlisted whole-file hash pair.
+    internal static Info Inspect(string sourcePath)
+    {
+        using var source = File.OpenRead(sourcePath);
+        var header = ReadHeader(source);
+        var dataStart = source.Position;
+        var files = JsonNode.Parse(header)?["files"] as JsonObject ??
+            throw new InvalidDataException("Invalid ASAR file tree.");
+        var package = ReadPackage(source, dataStart, files);
+        ReadFile(source, dataStart, files, "index.js");
+        ReadFile(source, dataStart, files, "preload.js");
+        return new Info(package["version"]?.GetValue<string>() ?? "", package["main"]?.GetValue<string>() ?? "", Hash(header));
+    }
+
+    internal static (string Original, string Patched) Build(string sourcePath, string destinationPath,
+        string expectedVersion = Version)
     {
         using var source = File.OpenRead(sourcePath);
         var originalHeader = ReadHeader(source);
@@ -22,12 +39,14 @@ internal static class AsarPatch
         var dataStart = source.Position;
         var header = JsonNode.Parse(originalHeader)!.AsObject();
         var files = header["files"]!.AsObject();
-        var package = JsonNode.Parse(ReadFile(source, dataStart, files, "package.json"))!.AsObject();
-        if (package["version"]?.GetValue<string>() != Version || package["main"]?.GetValue<string>() != "./index.js")
+        var package = ReadPackage(source, dataStart, files);
+        if (package["version"]?.GetValue<string>() != expectedVersion || package["main"]?.GetValue<string>() != "./index.js" ||
+            files.ContainsKey(DirectoryName))
         {
             throw new InvalidDataException("Unexpected Yandex Music package version or entry point.");
         }
 
+        ReadFile(source, dataStart, files, "index.js");
         package["main"] = "./musicsync-together/bootstrap.cjs";
         var preload = ReadFile(source, dataStart, files, "preload.js");
         var combinedPreload = preload.Concat("\n;\n"u8.ToArray())
@@ -131,11 +150,11 @@ internal static class AsarPatch
 
     private static byte[] ReadFile(Stream source, long dataStart, JsonObject files, string name)
     {
-        var entry = files[name]!.AsObject();
-        var offset = long.Parse(entry["offset"]!.GetValue<string>(), CultureInfo.InvariantCulture);
-        var size = entry["size"]!.GetValue<int>();
-        if (offset < 0 || size < 0 || offset > source.Length - dataStart - size ||
-            entry["unpacked"]?.GetValue<bool>() == true)
+        var entry = files[name] as JsonObject ?? throw new InvalidDataException($"Missing ASAR entry {name}.");
+        if (!long.TryParse(entry["offset"]?.GetValue<string>(), NumberStyles.None, CultureInfo.InvariantCulture, out var offset) ||
+            entry["size"] is not JsonValue sizeValue || !sizeValue.TryGetValue<int>(out var size) ||
+            offset < 0 || size < 0 || size > 32 * 1024 * 1024 || offset > source.Length - dataStart - size ||
+            entry["unpacked"]?.GetValue<bool>() == true || entry.ContainsKey("link"))
         {
             throw new InvalidDataException($"Invalid ASAR entry {name}.");
         }
@@ -143,12 +162,27 @@ internal static class AsarPatch
         var bytes = new byte[size];
         source.Position = dataStart + offset;
         source.ReadExactly(bytes);
-        if (Hash(bytes) != entry["integrity"]?["hash"]?.GetValue<string>())
+        var integrity = entry["integrity"] as JsonObject;
+        if (integrity?["algorithm"]?.GetValue<string>() != "SHA256" ||
+            Hash(bytes) != integrity["hash"]?.GetValue<string>() ||
+            integrity["blockSize"] is not JsonValue blockValue || !blockValue.TryGetValue<int>(out var blockSize) ||
+            blockSize <= 0 || blockSize > 32 * 1024 * 1024 || integrity["blocks"] is not JsonArray blocks ||
+            blocks.Count != Math.Max(1, (size + (long)blockSize - 1) / blockSize))
         {
             throw new InvalidDataException($"ASAR entry integrity mismatch for {name}.");
         }
+        for (var index = 0; index < blocks.Count; index++)
+        {
+            var blockStart = index * blockSize;
+            if (Hash(bytes.AsSpan(blockStart, Math.Min(blockSize, size - blockStart))) != blocks[index]?.GetValue<string>())
+                throw new InvalidDataException($"ASAR block integrity mismatch for {name}.");
+        }
         return bytes;
     }
+
+    private static JsonObject ReadPackage(Stream source, long dataStart, JsonObject files) =>
+        JsonNode.Parse(ReadFile(source, dataStart, files, "package.json")) as JsonObject ??
+        throw new InvalidDataException("Invalid ASAR package.json.");
 
     private static int AlignToFour(int size) => (size + 3) & ~3;
 

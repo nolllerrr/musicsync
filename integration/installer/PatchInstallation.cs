@@ -5,12 +5,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-internal sealed class PatchInstallation
+internal sealed partial class PatchInstallation
 {
-    private static readonly Pair Originals = new(
-        "5A259722D60F746EC32C8BF6E880E375E888315080FB18E67C29B54B582C1215",
-        "F5FB2817E331AA0B2DD0A6C7B0A360C89B5AE96AFC535CA085ABE514F8DE4AE4");
-    private const string ProductVersion = "5.126.1.0";
     internal const string AgentName = "MusicSync.Agent.exe";
     private const string ConfigName = "config.json";
     private const string PayloadName = "musicsync-together";
@@ -23,14 +19,26 @@ internal sealed class PatchInstallation
     private readonly string _asar;
     private readonly string _exe;
     private readonly string _payload;
-    private readonly Pair _originals;
+    private readonly IReadOnlyList<SupportedBuild> _builds;
+    private readonly Action<InstallCheckpoint>? _checkpoint;
+    private SupportedBuild _activeBuild;
+    private Pair _originals => _activeBuild.Originals;
+    internal string Root => _root;
 
-    internal PatchInstallation(string root) : this(root, Originals) { }
+    internal PatchInstallation(string root) : this(root, SupportedBuild.Catalog) { }
 
-    internal PatchInstallation(string root, Pair originals)
+    internal PatchInstallation(string root, Pair originals) :
+        this(root,
+        [new SupportedBuild("5.126.1", "5.126.1.0", originals)])
+    { }
+
+    internal PatchInstallation(string root, IReadOnlyList<SupportedBuild> builds, Action<InstallCheckpoint>? checkpoint = null)
     {
-        _root = root;
-        _originals = originals;
+        _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        root = _root;
+        _builds = builds;
+        _checkpoint = checkpoint;
+        _activeBuild = builds.First();
         _resources = Path.Combine(root, "resources");
         _state = Path.Combine(root, ".musicsync-together");
         _asar = Path.Combine(_resources, "app.asar");
@@ -73,6 +81,21 @@ internal sealed class PatchInstallation
     {
         var receipt = ReadReceipt();
 
+        // An official update owns its new files, even when an old journal says Installing.
+        // Recognize the complete new pair before considering rollback of the old transaction.
+        var stock = FindOriginalBuild();
+        if (receipt is null && stock is not null && Directory.Exists(_state) &&
+            !Directory.EnumerateFileSystemEntries(_state).Any())
+            Directory.Delete(_state); // Last cleanup step was interrupted; there are no files to discard.
+        if (receipt is not null && stock is not null)
+        {
+            ValidateOriginalStructure(stock);
+            endpoint ??= ReadVerifiedEndpoint(receipt);
+            RetireState(receipt);
+            receipt = null;
+        }
+        _activeBuild = stock ?? (receipt is not null ? ReceiptBuild(receipt) : _builds[0]);
+
         if (receipt is { Phase: Phase.Installing or Phase.Removing })
         {
             RestoreOriginals(receipt, music);
@@ -83,9 +106,9 @@ internal sealed class PatchInstallation
         {
             throw new InvalidOperationException("В каталоге Яндекс Музыки не найдены файлы приложения.");
         }
-        if (FileVersionInfo.GetVersionInfo(_exe).ProductVersion != ProductVersion)
+        if (FileVersionInfo.GetVersionInfo(_exe).ProductVersion != _activeBuild.ProductVersion)
         {
-            throw new InvalidOperationException($"Патч поддерживает проверенную сборку Яндекс Музыки {AsarPatch.Version}.");
+            throw new InvalidOperationException("Эта версия Яндекс Музыки пока не поддерживается. Дождитесь совместимого обновления MusicSync.");
         }
         var current = HashPair(_asar, _exe);
 
@@ -131,7 +154,9 @@ internal sealed class PatchInstallation
             return "Патч уже установлен.";
         }
 
-        var config = PatchSettings.Encode(endpoint ?? PatchSettings.Load());
+        if (receipt is null && Directory.Exists(_state))
+            throw new InvalidOperationException("Найдена незавершённая подготовка установки без журнала. Файлы сохранены; требуется проверка вручную.");
+        var config = PatchSettings.Encode(endpoint ?? ReadArchivedEndpoint() ?? PatchSettings.Load());
         var configHash = Hash(config);
         if (receipt is not null)
         {
@@ -256,31 +281,43 @@ internal sealed class PatchInstallation
     {
         Directory.CreateDirectory(_state);
         Receipt? receipt = null;
+        FileStream? applicationGuard = null;
         try
         {
             var originalAsar = StatePath("original.asar");
             var originalExe = StatePath("original.exe");
             File.Copy(_asar, originalAsar);
             File.Copy(_exe, originalExe);
+            FlushFile(originalAsar);
+            FlushFile(originalExe);
             AssertBackups();
 
             var patchedAsar = StatePath("patched.asar");
             var patchedExe = StatePath("patched.exe");
-            var (originalHeader, patchedHeader) = AsarPatch.Build(originalAsar, patchedAsar);
+            var (originalHeader, patchedHeader) = AsarPatch.Build(originalAsar, patchedAsar, _activeBuild.Version);
             PeAsarIntegrity.Build(originalExe, patchedExe, originalHeader, patchedHeader);
             var stagedPayload = StatePath(PayloadName);
             Directory.CreateDirectory(stagedPayload);
             File.Copy(agent, Path.Combine(stagedPayload, AgentName));
             File.WriteAllBytes(Path.Combine(stagedPayload, ConfigName), config);
-            var prepared = new Receipt(AsarPatch.Version, HashPair(patchedAsar, patchedExe), agentHash, configHash,
-                bundleHash, Phase.Installing);
+            FlushFile(Path.Combine(stagedPayload, AgentName));
+            FlushFile(Path.Combine(stagedPayload, ConfigName));
+            var prepared = new Receipt(_activeBuild.Version, HashPair(patchedAsar, patchedExe), agentHash, configHash,
+                bundleHash, Phase.Installing, Originals: _originals, ProductVersion: _activeBuild.ProductVersion);
             VerifyPayload(stagedPayload, prepared, allowMissing: false);
             music?.Close();
+            applicationGuard = GuardExecutable(_exe);
+            EnsureApplicationIdle();
+            if (HashPair(_asar, _exe) != _originals)
+                throw new IOException("The application changed while preparing the patch.");
             WriteReceipt(prepared);
             receipt = prepared;
             Directory.Move(stagedPayload, _payload);
-            ReplaceIfMatching(patchedAsar, _asar, _originals.Asar);
-            ReplaceIfMatching(patchedExe, _exe, _originals.Exe);
+            EnsureApplicationIdle();
+            ReplaceIfMatching(patchedAsar, _asar, _originals.Asar, receipt.Patched.Asar);
+            _checkpoint?.Invoke(InstallCheckpoint.AsarReplaced);
+            ReplaceIfMatching(patchedExe, _exe, _originals.Exe, receipt.Patched.Exe);
+            _checkpoint?.Invoke(InstallCheckpoint.PairReplaced);
             if (HashPair(_asar, _exe) != receipt.Patched)
             {
                 throw new IOException("Patched file verification failed.");
@@ -297,6 +334,11 @@ internal sealed class PatchInstallation
                 }
                 else
                 {
+                    // After the final rename the complete patched pair may already be running.
+                    // Acquire a writable image handle before rolling it back; if that fails,
+                    // leave the owned pair and journal for explicit recovery, without closing it.
+                    using var rollbackGuard = HashIfPresent(_exe) == receipt.Patched.Exe
+                        ? GuardExecutable(_exe) : null;
                     RestoreOriginals(receipt, music);
                 }
             }
@@ -307,6 +349,7 @@ internal sealed class PatchInstallation
             }
             throw new IOException($"Installation failed. The original files were preserved or restored. {error.Message}", error);
         }
+        finally { applicationGuard?.Dispose(); }
     }
 
     private void RestoreOriginals(Receipt receipt, YandexMusicRestart? music)
@@ -319,10 +362,7 @@ internal sealed class PatchInstallation
         {
             throw new InvalidOperationException("Recovery stopped because Yandex Music files have unrecognized checksums.");
         }
-        if (asarHash != _originals.Asar || exeHash != _originals.Exe)
-        {
-            AssertBackups();
-        }
+        AssertBackups();
         music?.Close();
         if (asarHash != _originals.Asar)
         {
@@ -345,19 +385,25 @@ internal sealed class PatchInstallation
     {
         var temporary = StatePath("restore.tmp");
         File.Copy(StatePath(original), temporary, overwrite: true);
+        var expected = original == "original.asar" ? _originals.Asar : _originals.Exe;
+        FlushFile(temporary);
+        if (Hash(temporary) != expected)
+            throw new IOException("The original backup changed during recovery.");
         if (currentHash is null)
         {
             File.Move(temporary, target);
         }
         else
         {
-            ReplaceIfMatching(temporary, target, currentHash);
+            ReplaceIfMatching(temporary, target, currentHash, expected);
         }
     }
 
-    private void AssertBackups()
+    private void AssertBackups() => AssertBackups(_activeBuild);
+
+    private void AssertBackups(SupportedBuild build)
     {
-        if (HashPair(StatePath("original.asar"), StatePath("original.exe")) != _originals)
+        if (HashPair(StatePath("original.asar"), StatePath("original.exe")) != build.Originals)
         {
             throw new IOException("The original backup checksums do not match the verified build.");
         }
@@ -365,7 +411,8 @@ internal sealed class PatchInstallation
 
     private void CheckPaths()
     {
-        foreach (var path in new[] { _root, _resources, _state, _asar, _exe, _payload, StatePath(PayloadName) })
+        foreach (var path in new[] { _root, _resources, _state, _asar, _exe, _payload, StatePath(PayloadName),
+                     StatePath("retired-payload"), HistoryPath })
         {
             CheckPath(path);
         }
@@ -374,7 +421,7 @@ internal sealed class PatchInstallation
             CheckPath(StatePath(name));
         }
         if (Directory.Exists(_state) && Directory.EnumerateFileSystemEntries(_state).Any(path =>
-                Path.GetFileName(path) != PayloadName && !StateFiles.Contains(Path.GetFileName(path))))
+                Path.GetFileName(path) is not (PayloadName or "retired-payload") && !StateFiles.Contains(Path.GetFileName(path))))
         {
             throw new IOException("Unrecognized files in the MusicSync backup directory.");
         }
@@ -382,15 +429,16 @@ internal sealed class PatchInstallation
 
     private static void CheckPath(string path)
     {
-        try
+        for (string? current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
         {
-            if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+            try
             {
-                throw new IOException($"The patch cannot use a redirected path: {path}");
+                if (File.GetAttributes(current).HasFlag(FileAttributes.ReparsePoint))
+                    throw new IOException($"The patch cannot use a redirected path: {current}");
             }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
         }
-        catch (FileNotFoundException) { }
-        catch (DirectoryNotFoundException) { }
     }
 
     private Receipt? ReadReceipt()
@@ -400,8 +448,16 @@ internal sealed class PatchInstallation
         {
             return null;
         }
+        return ReadReceiptFile(path);
+    }
+
+    private Receipt ReadReceiptFile(string path)
+    {
+        CheckPath(path);
         var receipt = JsonSerializer.Deserialize<Receipt>(File.ReadAllBytes(path));
-        if (receipt is null || receipt.Version != AsarPatch.Version || !Enum.IsDefined(receipt.Phase) ||
+        if (receipt is null || !_builds.Any(build => build.Version == receipt.Version &&
+                (receipt.Originals is null || receipt.Originals == build.Originals) &&
+                (receipt.ProductVersion is null || receipt.ProductVersion == build.ProductVersion)) || !Enum.IsDefined(receipt.Phase) ||
             !IsHash(receipt.Patched.Asar) || !IsHash(receipt.Patched.Exe) || !IsHash(receipt.AgentHash) ||
             !IsHash(receipt.ConfigHash) || !IsHash(receipt.BundleHash) ||
             (receipt.SettingsHash is not null && !IsHash(receipt.SettingsHash)) ||
@@ -502,9 +558,11 @@ internal sealed class PatchInstallation
         return Hash(Encoding.ASCII.GetBytes(string.Concat(hashes)));
     }
 
-    private static void ReplaceIfMatching(string source, string destination, string expectedHash)
+    private static void ReplaceIfMatching(string source, string destination, string expectedHash, string? sourceHash = null)
     {
-        if (Hash(destination) != expectedHash)
+        CheckPath(source);
+        CheckPath(destination);
+        if (Hash(destination) != expectedHash || (sourceHash is not null && Hash(source) != sourceHash))
         {
             throw new IOException($"The file changed during patching: {destination}");
         }
@@ -521,8 +579,15 @@ internal sealed class PatchInstallation
 
     private static string Hash(string path)
     {
-        using var file = File.OpenRead(path);
+        // A read-compatible writable image guard prevents CreateProcess during the two-file commit.
+        using var file = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         return Convert.ToHexString(SHA256.HashData(file));
+    }
+
+    internal static FileStream GuardExecutable(string path)
+    {
+        CheckPath(path);
+        return File.Open(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read | FileShare.Delete);
     }
 
     private static string Hash(ReadOnlySpan<byte> content) => Convert.ToHexString(SHA256.HashData(content));
@@ -530,7 +595,9 @@ internal sealed class PatchInstallation
     private static bool IsHash(string? value) => value?.Length == 64 && value.All(Uri.IsHexDigit);
 
     internal readonly record struct Pair(string Asar, string Exe);
+    internal enum InstallCheckpoint { AsarReplaced, PairReplaced }
     private sealed record Receipt(string Version, Pair Patched, string AgentHash, string ConfigHash, string BundleHash,
-        Phase Phase, string? SettingsHash = null, string? PendingSettingsHash = null);
+        Phase Phase, string? SettingsHash = null, string? PendingSettingsHash = null,
+        Pair? Originals = null, string? ProductVersion = null);
     private enum Phase { Installing = 1, Installed, Removing }
 }

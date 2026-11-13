@@ -12,6 +12,7 @@ internal partial class PatchWindow : Window
     private readonly PatchInstallation _installation;
     private readonly CancellationTokenSource _windowLifetime = new();
     private Task<InstallerRelease?>? _updateCheck;
+    private int _noticeVersion;
 
     internal PatchWindow(PatchInstallation installation)
     {
@@ -31,7 +32,19 @@ internal partial class PatchWindow : Window
     private async void CheckUpdatesOnLoad(object sender, RoutedEventArgs e)
     {
         Loaded -= CheckUpdatesOnLoad;
-        await CheckUpdatesAsync(interactive: false);
+        await Task.WhenAll(CheckUpdatesAsync(interactive: false), CheckCompatibilityAsync());
+    }
+
+    private async Task CheckCompatibilityAsync()
+    {
+        var noticeVersion = _noticeVersion;
+        var cancellationToken = _windowLifetime.Token;
+        var diagnosis = await Task.Run(_installation.Diagnose);
+        if (cancellationToken.IsCancellationRequested || noticeVersion != _noticeVersion)
+            return;
+
+        if (CompatibilityNotice.For(diagnosis) is { } message)
+            SetNotice(message);
     }
 
     private async void CheckUpdates_Click(object sender, RoutedEventArgs e)
@@ -174,6 +187,7 @@ internal partial class PatchWindow : Window
 
     private void SetNotice(string message)
     {
+        _noticeVersion++;
         Notice.Text = message;
         UIElementAutomationPeer.FromElement(Notice)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }

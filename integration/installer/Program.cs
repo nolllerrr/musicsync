@@ -1,5 +1,7 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Windows;
 
 internal static class Program
@@ -19,6 +21,15 @@ internal static class Program
 
         try
         {
+            if (args is ["diagnose", ..] && args.Length <= 2)
+            {
+                Console.OutputEncoding = Encoding.UTF8;
+                directory = args.Length == 2 ? Path.GetFullPath(args[1]) : directory;
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                options.Converters.Add(new JsonStringEnumConverter());
+                Console.WriteLine(JsonSerializer.Serialize(new PatchInstallation(directory).Diagnose(), options));
+                return 0;
+            }
             if (args is ["install" or "uninstall", ..] && args.Length <= 2)
             {
                 Console.OutputEncoding = Encoding.UTF8;
@@ -34,7 +45,7 @@ internal static class Program
             }
             else if (args.Length != 0)
             {
-                Console.Error.WriteLine("Usage: MusicSync.Patch.exe [--directory <path> | install|uninstall [path]]");
+                Console.Error.WriteLine("Usage: MusicSync.Patch.exe [--directory <path> | install|uninstall|diagnose [path]]");
                 return 2;
             }
 

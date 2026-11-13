@@ -8,6 +8,28 @@ internal sealed class YandexMusicRestart(string executable, string agent)
 {
     private string[]? _restartArguments;
 
+    internal static bool IsRunning(string root)
+    {
+        foreach (var path in new[] { Path.Combine(root, "Яндекс Музыка.exe"),
+                     Path.Combine(root, "resources", "musicsync-together", PatchInstallation.AgentName) })
+        {
+            foreach (var process in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path)))
+            {
+                using (process)
+                {
+                    try
+                    {
+                        if (!process.HasExited && string.Equals(process.MainModule?.FileName, path, StringComparison.OrdinalIgnoreCase))
+                            return true;
+                    }
+                    catch (InvalidOperationException) { }
+                    catch (Win32Exception) { return true; }
+                }
+            }
+        }
+        return false;
+    }
+
     internal bool ShouldRestart => _restartArguments is not null;
 
     internal void Close()
