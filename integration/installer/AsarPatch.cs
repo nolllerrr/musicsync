@@ -76,7 +76,10 @@ internal static class AsarPatch
                 ["offset"] = offset.ToString(CultureInfo.InvariantCulture),
                 ["integrity"] = new JsonObject
                 {
-                    ["algorithm"] = "SHA256", ["hash"] = hash, ["blockSize"] = BlockSize, ["blocks"] = blocks
+                    ["algorithm"] = "SHA256",
+                    ["hash"] = hash,
+                    ["blockSize"] = BlockSize,
+                    ["blocks"] = blocks
                 }
             };
             appended.Add(content);

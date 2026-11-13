@@ -59,8 +59,11 @@ public sealed class SyncClock(MonotonicClock clock)
             return null;
         return Project(listener) - Project(leader);
 
-        bool Usable(PlayerReport? report) => report is { PositionMs: not null, SampleTime: not null,
-            DurationMs: not null, RttMs: <= 400 } && report.Revision == state.Revision &&
+        bool Usable(PlayerReport? report) => report is
+        {
+            PositionMs: not null, SampleTime: not null,
+            DurationMs: not null, RttMs: <= 400
+        } && report.Revision == state.Revision &&
             report.Playback == state.Playback && report.SampleTime >= now - 5000 && report.SampleTime <= now + 500;
 
         long Project(PlayerReport report) => Math.Min(report.DurationMs!.Value, report.PositionMs!.Value +

@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using MusicSync.Core;
 using MusicSync.Yandex;
 
@@ -5,10 +6,48 @@ namespace MusicSync.Agent;
 
 internal sealed record AgentSwap(Guid Id, Role? RequestedBy, long? RemainingMs);
 
+internal sealed record AgentTransfer(Guid Id, Guid InitiatorParticipantId, Guid TargetParticipantId, long RemainingMs);
+
 internal sealed record AgentState(string Status, Role? Role = null, string? Code = null,
     bool? PeerConnected = null, string? Error = null, AgentSwap? Swap = null, string? PlaybackError = null)
 {
     public string Type => "state";
+    public IReadOnlyList<Participant> Participants { get; init; } = Array.Empty<Participant>();
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
+    public Guid? SelfParticipantId { get; init; }
+    public int Capacity { get; init; }
+    public bool SupportsLeadershipTransfer { get; init; }
+    public AgentTransfer? Transfer { get; init; }
+
+    internal static AgentState Project(ConnectionView view, long serverNow, PlayerView? player)
+    {
+        if (view.Status == ConnectionStatus.Ended)
+            return new("ended", Error: view.Error);
+
+        var swap = view.Room?.Swap;
+        var activeSwap = view.Status == ConnectionStatus.Connected && swap is not null
+            ? new AgentSwap(swap.Id, swap.RequestedBy,
+                swap.ExpiresAt is long deadline ? Math.Clamp(deadline - serverNow, 0, 30_000) : null)
+            : null;
+        string status = view.Status switch
+        {
+            ConnectionStatus.Connected => "connected",
+            ConnectionStatus.Reconnecting => "reconnecting",
+            _ => "connecting"
+        };
+        string? playbackError = view.Status == ConnectionStatus.Connected &&
+            player is { Kind: ReportKind.Failed } failed ? failed.Detail ?? "player-error" : null;
+        return new(status, view.Role, view.Room?.State.RoomId, view.PeerConnected, view.Error, activeSwap, playbackError)
+        {
+            Participants = view.Participants,
+            SelfParticipantId = view.SelfParticipantId,
+            Capacity = view.Capacity,
+            SupportsLeadershipTransfer = view.SupportsLeadershipTransfer,
+            Transfer = view.Status == ConnectionStatus.Connected && view.Room?.Transfer is { } transfer
+                ? new(transfer.Id, transfer.InitiatorParticipantId, transfer.TargetParticipantId,
+                    Math.Clamp(transfer.ExpiresAt - serverNow, 0, LeadershipTransfer.WindowMs)) : null
+        };
+    }
 }
 
 internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> log)
@@ -39,6 +78,8 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
                     "create" => await ConnectAsync(null),
                     "join" => await JoinAsync(command.Code),
                     "swapRoles" => await SwapAsync(command.SwapId),
+                    "transferLeadership" => await LeadershipAsync(command.Command, command.TargetParticipantId),
+                    "acceptLeadership" or "cancelLeadership" => await LeadershipAsync(command.Command, command.TransferId),
                     "retryPlayback" => RetryPlayback(),
                     _ => "invalid-command"
                 };
@@ -93,6 +134,21 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
         return await room.SwapRolesAsync(swap.Id);
     }
 
+    private Task<string?> LeadershipAsync(string command, Guid? id)
+    {
+        var room = connection;
+        if (room is null || room.View.Status != ConnectionStatus.Connected)
+            return Task.FromResult<string?>("offline");
+        if (id is null || id == Guid.Empty)
+            return Task.FromResult<string?>("invalid-command");
+        return command switch
+        {
+            "transferLeadership" => room.TransferLeadershipAsync(id.Value),
+            "acceptLeadership" => room.AcceptLeadershipAsync(id.Value),
+            _ => room.CancelLeadershipAsync(id.Value)
+        };
+    }
+
     private string? RetryPlayback()
     {
         if (connection?.View.Status != ConnectionStatus.Connected || player is not { } activePlayer)
@@ -139,23 +195,6 @@ internal sealed class AgentSession(AgentPipe pipe, Uri endpoint, Action<string> 
         if (room is null)
             return null;
         var view = room.View;
-        if (view.Status == ConnectionStatus.Ended)
-            return new("ended", Error: view.Error);
-
-        var peer = view.Role == Role.Leader ? view.Room?.Listener : view.Room?.Leader;
-        var swap = view.Room?.Swap;
-        var activeSwap = view.Status == ConnectionStatus.Connected && swap is not null
-            ? new AgentSwap(swap.Id, swap.RequestedBy,
-                swap.ExpiresAt is long deadline ? Math.Clamp(deadline - room.Clock.Now, 0, 30_000) : null)
-            : null;
-        string status = view.Status switch
-        {
-            ConnectionStatus.Connected => "connected",
-            ConnectionStatus.Reconnecting => "reconnecting",
-            _ => "connecting"
-        };
-        string? playbackError = view.Status == ConnectionStatus.Connected &&
-            player?.View is { Kind: ReportKind.Failed } failed ? failed.Detail ?? "player-error" : null;
-        return new(status, view.Role, view.Room?.State.RoomId, peer?.Connected, view.Error, activeSwap, playbackError);
+        return AgentState.Project(view, room.Clock.Now, player?.View);
     }
 }

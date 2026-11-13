@@ -7,7 +7,8 @@ using MusicSync.Yandex;
 namespace MusicSync.Agent;
 
 internal sealed record AgentInput(string Type, int Id, string? Command = null, string? Code = null,
-    Guid? SwapId = null, JsonElement? Result = null, string? Error = null);
+    Guid? SwapId = null, JsonElement? Result = null, string? Error = null,
+    Guid? TargetParticipantId = null, Guid? TransferId = null);
 
 internal sealed record AgentResult(int Id, string? Error = null)
 {

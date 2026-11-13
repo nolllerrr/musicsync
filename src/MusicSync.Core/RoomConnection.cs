@@ -7,9 +7,17 @@ namespace MusicSync.Core;
 public enum ConnectionStatus { Connecting, Connected, Reconnecting, Ended }
 
 public sealed record ConnectionView(ConnectionStatus Status, Role? Role = null, RoomView? Room = null,
-    long Generation = 0, string? Error = null);
+    long Generation = 0, string? Error = null, Guid? ParticipantId = null, bool SupportsLeadershipTransfer = false)
+{
+    public IReadOnlyList<Participant> Participants { get; init; } = Array.Empty<Participant>();
+    public Guid? SelfParticipantId { get; init; }
+    public int Capacity { get; init; }
+    public PlayerReport? LeaderReport => RoomMembership.LeaderReport(this);
+    // Summary compatibility; the roster uses Participants.
+    public bool? PeerConnected => RoomMembership.PeerConnected(this);
+}
 
-public sealed class RoomConnection : IAsyncDisposable
+public sealed class RoomConnection : IRoomConnection, IAsyncDisposable
 {
     private static readonly HttpMessageInvoker Ipv4WebSocketInvoker = new(new SocketsHttpHandler
     {
@@ -40,6 +48,13 @@ public sealed class RoomConnection : IAsyncDisposable
     private int disposed;
     public SyncClock Clock { get; } = new(new MonotonicClock());
     public ConnectionView View => view;
+    public event Action? Changed;
+
+    private void SetView(ConnectionView next)
+    {
+        view = next;
+        Changed?.Invoke();
+    }
 
     public RoomConnection(Uri endpoint, string? invitation, Action<string>? log = null)
     {
@@ -112,7 +127,45 @@ public sealed class RoomConnection : IAsyncDisposable
         finally { actionGate.Release(); }
     }
 
-    private async Task<string?> RequestAsync(string type, long generation, RoomAction? action = null, Guid? swapId = null)
+    public Task<string?> TransferLeadershipAsync(Guid targetParticipantId) =>
+        LeadershipRequestAsync("transfer-leadership", targetParticipantId);
+
+    public Task<string?> AcceptLeadershipAsync(Guid transferId) =>
+        LeadershipRequestAsync("accept-leadership", transferId);
+
+    // Both the initiator (cancel) and the selected listener (decline) use this command.
+    public Task<string?> CancelLeadershipAsync(Guid transferId) =>
+        LeadershipRequestAsync("cancel-leadership", transferId);
+
+    private async Task<string?> LeadershipRequestAsync(string type, Guid value)
+    {
+        await actionGate.WaitAsync();
+        try
+        {
+            var current = View;
+            if (current.Status != ConnectionStatus.Connected || current.Room is null)
+                return "offline";
+            if (!current.SupportsLeadershipTransfer)
+                return "leadership-transfer-unavailable";
+            if (value == Guid.Empty)
+                return "invalid-command";
+            if (type == "transfer-leadership")
+            {
+                if (current.Role != Role.Leader)
+                    return "leader-only";
+                return await RequestAsync(type, current.Generation, targetParticipantId: value);
+            }
+            if (current.Room.Transfer is not { } transfer || transfer.Id != value)
+                return "leadership-transfer-stale";
+            if (transfer.ExpiresAt <= Clock.Now)
+                return "leadership-transfer-expired";
+            return await RequestAsync(type, current.Generation, transferId: value);
+        }
+        finally { actionGate.Release(); }
+    }
+
+    private async Task<string?> RequestAsync(string type, long generation, RoomAction? action = null, Guid? swapId = null,
+        Guid? targetParticipantId = null, Guid? transferId = null)
     {
         var id = Guid.NewGuid();
         var response = new TaskCompletionSource<ServerMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -128,7 +181,8 @@ public sealed class RoomConnection : IAsyncDisposable
         timeout.CancelAfter(TimeSpan.FromSeconds(3));
         try
         {
-            await SendAsync(transport, new(Protocol.Version, type, Id: id, Action: action, SwapId: swapId), timeout.Token);
+            await SendAsync(transport, new(Protocol.Version, type, Id: id, Action: action, SwapId: swapId,
+                TargetParticipantId: targetParticipantId, TransferId: transferId), timeout.Token);
             return (await response.Task.WaitAsync(timeout.Token)).Error;
         }
         catch (Exception ex) when (IsNetworkError(ex)) { return "delivery-unknown"; }
@@ -148,6 +202,7 @@ public sealed class RoomConnection : IAsyncDisposable
             using var transport = new Transport();
             using var attempt = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             var socket = transport.Socket;
+            socket.Options.AddSubProtocol(Protocol.LeadershipTransferSubProtocol);
             socket.Options.AddSubProtocol(Protocol.RoleSwapSubProtocol);
             socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(15);
             if (endpoint.Scheme == "ws")
@@ -172,11 +227,12 @@ public sealed class RoomConnection : IAsyncDisposable
                     End(welcome.Error ?? "protocol-error");
                     return;
                 }
-                if (welcome is not { Type: "welcome", Room: not null, Role: not null })
+                if (welcome is not { Type: "welcome", Room: not null, Role: not null, ParticipantId: not null } ||
+                    !welcome.Room.Participants.Any(p => p.ParticipantId == welcome.ParticipantId && p.Role == welcome.Role))
                     throw new InvalidDataException("Expected a room snapshot.");
                 joined = welcome.Room.State.RoomId;
-                var initialRoom = welcome.Room;
-                var role = welcome.Role;
+                var initialView = RoomMembership.Update(
+                    new(ConnectionStatus.Connected, welcome.Role, welcome.Room, View.Generation + 1), welcome);
                 while (true)
                 {
                     var first = await ReceiveAsync(socket, connectTimeout.Token);
@@ -187,8 +243,11 @@ public sealed class RoomConnection : IAsyncDisposable
                     }
                     if (first is { Type: "snapshot", Room: not null })
                     {
-                        initialRoom = first.Room;
-                        role = first.Role ?? role;
+                        initialView = RoomMembership.Update(initialView with
+                        {
+                            Room = first.Room,
+                            Role = first.Role ?? initialView.Role
+                        }, first);
                     }
                     else if (first is { Type: "pong", Ping: not null, Received: not null, Sent: not null } && first.Ping == ping)
                     {
@@ -202,10 +261,14 @@ public sealed class RoomConnection : IAsyncDisposable
                 lock (gate)
                 {
                     active = transport;
-                    view = new(ConnectionStatus.Connected, role, initialRoom, View.Generation + 1);
+                    SetView(initialView with
+                    {
+                        SupportsLeadershipTransfer =
+                        socket.SubProtocol == Protocol.LeadershipTransferSubProtocol
+                    });
                 }
                 delay = 1;
-                log?.Invoke($"Connected ({role}).");
+                log?.Invoke($"Connected ({initialView.Role}).");
                 heartbeat = HeartbeatAsync(transport, attempt);
                 while (!attempt.IsCancellationRequested)
                 {
@@ -216,7 +279,11 @@ public sealed class RoomConnection : IAsyncDisposable
                             var current = View;
                             if (message.Room.State.RoomId == joined &&
                                 message.Room.State.Revision >= current.Room!.State.Revision)
-                                view = current with { Role = message.Role ?? current.Role, Room = message.Room };
+                                SetView(RoomMembership.Update(current with
+                                {
+                                    Role = message.Role ?? current.Role,
+                                    Room = message.Room
+                                }, message));
                             break;
                         case { Type: "pong", Ping: not null, Received: not null, Sent: not null }:
                             ObservePong(message);
@@ -246,7 +313,7 @@ public sealed class RoomConnection : IAsyncDisposable
             {
                 if (!cancellation.IsCancellationRequested)
                 {
-                    view = View with { Status = ConnectionStatus.Reconnecting, Error = "connection-lost" };
+                    SetView(View with { Status = ConnectionStatus.Reconnecting, Error = "connection-lost" });
                     log?.Invoke($"Connection interrupted ({ex.GetType().Name}).");
                 }
             }
@@ -293,7 +360,7 @@ public sealed class RoomConnection : IAsyncDisposable
 
     private void End(string reason)
     {
-        view = View with { Status = ConnectionStatus.Ended, Error = reason };
+        SetView(View with { Status = ConnectionStatus.Ended, Error = reason });
         log?.Invoke($"Room ended ({reason}).");
     }
 

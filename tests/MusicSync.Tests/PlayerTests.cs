@@ -44,11 +44,20 @@ public sealed class PlayerTests
         var state = new RoomState("ROOM", 4, 1, First, Playback.Playing, 20_000, t, false);
         var leader = new PlayerReport(4, ReportKind.Applied, 20_000, 120_000, t, 25, Playback.Playing);
         var guest = new PlayerReport(4, ReportKind.Applied, 20_200, 120_000, t + 500, 30, Playback.Playing);
-        var view = new RoomView(state, new(true, leader), new(true, guest));
+        var view = new RoomView(state,
+            [new(Guid.NewGuid(), Role.Leader, true, leader), new(Guid.NewGuid(), Role.Listener, true, guest)], 10);
         Assert.AreEqual(-300L, SyncClock.Difference(view, t + 2000));
         Assert.IsNull(SyncClock.Difference(view, t + 6000));
-        Assert.IsNull(SyncClock.Difference(view with { Listener = new(true, guest with { Revision = 3 }) }, t + 2000));
-        Assert.IsNull(SyncClock.Difference(view with { Listener = new(true, guest with { RttMs = null }) }, t + 2000));
+        Assert.IsNull(SyncClock.Difference(view with
+        {
+            Participants = [view.Leader,
+            view.Listener with { Report = guest with { Revision = 3 } }]
+        }, t + 2000));
+        Assert.IsNull(SyncClock.Difference(view with
+        {
+            Participants = [view.Leader,
+            view.Listener with { Report = guest with { RttMs = null } }]
+        }, t + 2000));
     }
 
     [TestMethod]
@@ -143,7 +152,7 @@ public sealed class PlayerTests
         Assert.AreEqual(0, mock.Loads);
         mock.Running = true;
         await Check.EventuallyAsync(() => host.View.Room?.Leader.Report is
-            { Kind: ReportKind.Failed, Detail: "track-unavailable" });
+        { Kind: ReportKind.Failed, Detail: "track-unavailable" });
         Assert.IsNull(await host.ActionAsync(ActionKind.Select, Second));
         await Check.EventuallyAsync(() => host.View.Room?.Leader.Report is { Kind: ReportKind.Applied, Revision: 2 });
         Assert.AreEqual(Second, worker.View.Reading.Track);
@@ -263,7 +272,7 @@ public sealed class PlayerTests
         await Check.EventuallyAsync(() => leader.View.Room?.Listener.Report is { Kind: ReportKind.Applied, Revision: 1 });
         listenerPlayer.ManualPlayback(FakePlayer.DurationMs - 1100, Playback.Playing);
         await Check.EventuallyAsync(() => leader.View.Room?.Listener.Report is
-            { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Revision: 1 });
+        { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Revision: 1 });
         await Task.Delay(1200);
         Assert.AreEqual(0, listenerPlayer.AutoAdvances);
         Assert.AreEqual(Playback.Paused, listenerWorker.View.Reading.Playback);
@@ -276,7 +285,7 @@ public sealed class PlayerTests
 
         leaderPlayer.ManualPlayback(FakePlayer.DurationMs, Playback.Playing);
         await Check.EventuallyAsync(() => leader.View.Room?.Listener.Report is
-            { Kind: ReportKind.Applied, Revision: 2, Playback: Playback.Playing });
+        { Kind: ReportKind.Applied, Revision: 2, Playback: Playback.Playing });
         Assert.AreEqual(Second, listenerWorker.View.Reading.Track);
         Assert.AreEqual(0, leaderPlayer.PlaybackCommands);
         Assert.AreEqual(2, listenerPlayer.Loads);
@@ -294,13 +303,13 @@ public sealed class PlayerTests
         await using var worker = new RoomPlayer(listenerPlayer, () => listener, 1200);
 
         await Check.EventuallyAsync(() => leader.View.Room?.Listener.Report is
-            { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Revision: 1 });
+        { Kind: ReportKind.Waiting, Detail: "waiting-next-track", Revision: 1 });
         Assert.AreEqual(Playback.Paused, worker.View.Reading.Playback);
         Assert.AreEqual(0, listenerPlayer.Seeks);
 
         Assert.IsNull(await leader.ActionAsync(ActionKind.Seek, position: 30_000));
         await Check.EventuallyAsync(() => leader.View.Room?.Listener.Report is
-            { Kind: ReportKind.Applied, Revision: 2, Playback: Playback.Playing });
+        { Kind: ReportKind.Applied, Revision: 2, Playback: Playback.Playing });
         Assert.AreEqual(First, worker.View.Reading.Track);
         Assert.AreEqual(1, listenerPlayer.Loads);
     }
@@ -342,7 +351,7 @@ public sealed class PlayerTests
 
         bridge.Drop();
         await Check.EventuallyAsync(() => guest.View is
-            { Status: ConnectionStatus.Connected, Generation: 2, Role: Role.Leader });
+        { Status: ConnectionStatus.Connected, Generation: 2, Role: Role.Leader });
         guestPlayer.Manual(Second, 10_000, Playback.Playing);
         await Check.EventuallyAsync(() => hostWorker.View.Reading.Track == Second &&
             host.View.Room?.Listener.Report is { Kind: ReportKind.Applied, Playback: Playback.Playing });
@@ -363,7 +372,7 @@ public sealed class PlayerTests
         var guestPlayer = new FakePlayer(() => guest.Clock.Now);
         await using var guestWorker = new RoomPlayer(guestPlayer, () => guest, 1200);
         await Check.EventuallyAsync(() => host.View.Room?.Listener.Report is
-            { Kind: ReportKind.Waiting, Detail: "waiting-next-track" });
+        { Kind: ReportKind.Waiting, Detail: "waiting-next-track" });
 
         var swap = host.View.Room!.Swap!.Id;
         Assert.IsNull(await host.SwapRolesAsync(swap));
@@ -371,6 +380,60 @@ public sealed class PlayerTests
         await Check.EventuallyAsync(() => guest.View.Role == Role.Leader && guestWorker.View.Detail == "track-ended");
         guestPlayer.Manual(Second, 0, Playback.Playing);
         await Check.EventuallyAsync(() => host.View.Room?.State.Track == Second);
+    }
+
+    [TestMethod]
+    [DataRow(true, false)]
+    [DataRow(false, false)]
+    [DataRow(true, true)]
+    [DataRow(false, true)]
+    public async Task LeadershipChangeDuringLoadOrSeekCannotPublishThePreviousRolesState(bool duringLoad, bool targeted)
+    {
+        await using var server = await LocalServer.StartAsync();
+        await using var host = new RoomConnection(server.Uri, null);
+        await Check.EventuallyAsync(() => host.View.Status == ConnectionStatus.Connected);
+        Assert.IsNull(await host.ActionAsync(ActionKind.Adopt, First, 30_000, Playback.Paused));
+        await using var guest = new RoomConnection(server.Uri, host.View.Room!.State.RoomId);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var mock = new FakePlayer(() => guest.Clock.Now)
+        {
+            HoldFirst = duringLoad ? release.Task : null,
+            HoldSeek = duringLoad ? null : release.Task
+        };
+        await using var worker = new RoomPlayer(mock, () => guest, 1200);
+        try
+        {
+            await Check.EventuallyAsync(() => host.View.Room?.Swap is not null &&
+                (duringLoad ? mock.Loads == 1 : mock.Seeks == 1));
+            if (targeted)
+            {
+                Assert.IsNull(await host.TransferLeadershipAsync(guest.View.SelfParticipantId!.Value));
+                await Check.EventuallyAsync(() => guest.View.Room?.Transfer is not null);
+                Assert.IsNull(await guest.AcceptLeadershipAsync(guest.View.Room!.Transfer!.Id));
+            }
+            else
+            {
+                var swap = host.View.Room!.Swap!.Id;
+                Assert.IsNull(await host.SwapRolesAsync(swap));
+                Assert.IsNull(await guest.SwapRolesAsync(swap));
+            }
+            await Check.EventuallyAsync(() => guest.View.Role == Role.Leader && host.View.Role == Role.Listener);
+            Assert.AreEqual(2L, guest.View.Room!.State.Revision);
+            Assert.AreEqual(30_000L, guest.View.Room.State.PositionMs);
+            Assert.AreEqual(Playback.Paused, guest.View.Room.State.Playback);
+            Assert.IsNull(guest.View.Room.Leader.Report);
+            Assert.IsNull(guest.View.Room.Listener.Report);
+            Assert.AreEqual("leader-only", await host.ActionAsync(ActionKind.Select, Second));
+            Assert.AreEqual("stale-revision", await guest.ActionAsync(ActionKind.Select, Second, expectedRevision: 1));
+            Assert.IsNull(await guest.ActionAsync(ActionKind.Select, Second));
+            release.TrySetResult();
+            await Check.EventuallyAsync(() => guest.View.Room?.Leader.Report is { Kind: ReportKind.Applied, Revision: 3 } &&
+                host.View.Room?.State.Revision == 3);
+            Assert.AreEqual(Second, worker.View.Reading.Track);
+            Assert.AreEqual(Playback.Playing, worker.View.Reading.Playback);
+            Assert.AreEqual(3L, host.View.Room!.State.Revision);
+        }
+        finally { release.TrySetResult(); }
     }
 
     [TestMethod]
@@ -413,6 +476,8 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public TrackId? Unavailable { get; init; }
     public TrackId? NextOnEnd { get; init; }
     public Task? HoldFirst { get; init; }
+    public TaskCompletionSource FirstLoadStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public Task? HoldSeek { get; init; }
     public Func<FakePlayer, CancellationToken, Task>? BeforeObserve { get; init; }
 
     public void Manual(TrackId selected, long ms, Playback state, bool exact = true)
@@ -455,8 +520,12 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
 
     public async Task<PlayerReading> LoadAsync(TrackId selected, CancellationToken token)
     {
-        if (Interlocked.Increment(ref loads) == 1 && HoldFirst is not null)
-            await HoldFirst.WaitAsync(token);
+        if (Interlocked.Increment(ref loads) == 1)
+        {
+            FirstLoadStarted.TrySetResult();
+            if (HoldFirst is not null)
+                await HoldFirst.WaitAsync(token);
+        }
         if (selected == Unavailable)
             throw new PlayerException("track-unavailable");
         lock (gate)
@@ -481,14 +550,15 @@ internal sealed class FakePlayer(Func<long> now) : IPlayer
     public Task<PlayerReading> PauseForHandoffAsync(CancellationToken token) =>
         SetPlaybackAsync(Playback.Paused, token);
 
-    public Task<PlayerReading> SeekAsync(long positionMs, CancellationToken token)
+    public async Task<PlayerReading> SeekAsync(long positionMs, CancellationToken token)
     {
+        if (Interlocked.Increment(ref seeks) == 1 && HoldSeek is not null)
+            await HoldSeek.WaitAsync(token);
         lock (gate)
         {
-            Interlocked.Increment(ref seeks);
             position = positionMs;
             anchored = now();
-            return Task.FromResult(Read());
+            return Read();
         }
     }
 

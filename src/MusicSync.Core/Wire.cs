@@ -10,7 +10,8 @@ public static class Wire
     {
         using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         limit.CancelAfter(timeout);
-        var buffer = new byte[Protocol.MaxMessageBytes];
+        var buffer = new byte[typeof(T) == typeof(ServerMessage)
+            ? Protocol.MaxServerMessageBytes : Protocol.MaxMessageBytes];
         int length = 0;
         ValueWebSocketReceiveResult frame;
         do
@@ -29,7 +30,12 @@ public static class Wire
             ?? throw new InvalidDataException("A JSON object is required.");
     }
 
-    public static ValueTask SendAsync<T>(WebSocket socket, T message, CancellationToken cancellation) =>
-        socket.SendAsync(JsonSerializer.SerializeToUtf8Bytes(message, Protocol.Json).AsMemory(),
-            WebSocketMessageType.Text, true, cancellation);
+    public static ValueTask SendAsync<T>(WebSocket socket, T message, CancellationToken cancellation)
+    {
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(message, Protocol.Json);
+        int maximum = message is ServerMessage ? Protocol.MaxServerMessageBytes : Protocol.MaxMessageBytes;
+        if (bytes.Length > maximum)
+            throw new InvalidDataException("Message too large.");
+        return socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, cancellation);
+    }
 }

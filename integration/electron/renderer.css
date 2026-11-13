@@ -8,7 +8,7 @@
 }
 
 #music-sync-together-button:focus-visible,
-#music-sync-together-panel :is(button, input):focus-visible {
+#music-sync-together-panel :is(button, input, ul):focus-visible {
   outline: 2px solid var(--ym-controls-color-primary-default-focused_stroke, currentColor);
   outline-offset: -2px;
 }
@@ -134,6 +134,75 @@
 #music-sync-together-panel dd {
   margin: 0;
   text-align: end;
+}
+
+#music-sync-together-panel h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+#music-sync-together-panel .music-sync-together-count {
+  font-variant-numeric: tabular-nums;
+}
+
+#music-sync-together-panel .music-sync-together-hint {
+  font-size: 12px;
+}
+
+#music-sync-together-panel .music-sync-together-members {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(280px, 38vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+#music-sync-together-panel .music-sync-together-member {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+}
+
+#music-sync-together-panel .music-sync-together-member > button {
+  justify-self: start;
+  max-width: 100%;
+}
+
+#music-sync-together-panel .music-sync-together-member[data-self="true"] {
+  background: var(--ym-controls-color-secondary-default-enabled, #7772);
+  border-color: var(--ym-controls-color-secondary-outline-enabled_stroke, #7776);
+}
+
+#music-sync-together-panel .music-sync-together-member-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 2px 8px;
+}
+
+#music-sync-together-panel .music-sync-together-member-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+
+#music-sync-together-panel .music-sync-together-member-role,
+#music-sync-together-panel .music-sync-together-member-status {
+  font-size: 12px;
+  color: var(--ym-controls-color-primary-text-enabled, currentColor);
+}
+
+#music-sync-together-panel .music-sync-together-member[data-leader="true"] .music-sync-together-member-role {
+  color: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 #music-sync-together-panel .music-sync-together-request {

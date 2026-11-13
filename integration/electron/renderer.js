@@ -18,15 +18,20 @@
     reconnecting: 'Переподключение…', ended: 'Связь завершена'
   };
   const errors = {
+    'leadership-transfer-pending': 'Сначала дождитесь ответа на текущий запрос.',
+    'leadership-transfer-unavailable': 'Участник временно недоступен для передачи управления.',
+    'leadership-transfer-stale': 'Запрос передачи управления уже недействителен.',
+    'leadership-transfer-expired': 'Время подтверждения истекло.',
+    'leadership-transfer-target-only': 'Подтвердить может только выбранный участник.',
     'invalid-room-code': 'Проверьте код комнаты.',
     'already-in-room': 'Подключение к комнате уже открыто.',
     'instance-in-use': 'Закройте другой MusicSync в этом сеансе Windows.',
-    'room-full': 'В комнате уже есть второй участник.',
+    'room-full': 'Комната заполнена: достигнут лимит участников.',
     'room-unavailable': 'Комната недоступна. Проверьте код или создайте новую.',
     'server-full': 'На сервере достигнут лимит комнат.',
     'room-creation-limited': 'Для вашего IP-адреса достигнут лимит создания комнат. Попробуйте позже или войдите по коду.',
     'role-swap-stale': 'Время запроса истекло. Отправьте новый запрос.',
-    'role-swap-unavailable': 'Для смены ролей оба участника должны быть в сети.',
+    'role-swap-unavailable': 'Смена ролей сейчас недоступна. Проверьте подключение участников.',
     'leader-left': 'Ведущий вышел. Комната закрыта.',
     'leader-timeout': 'Ведущий не вернулся. Комната закрыта.',
     'agent-config-invalid': 'Проверьте настройки сервера MusicSync.',
@@ -106,8 +111,18 @@
 
   const role = element('dd');
   const peer = element('dd');
+  const peerLabel = element('dt', {}, 'Другие участники');
   const details = element('dl');
-  details.append(element('dt', {}, 'Ваша роль'), role, element('dt', {}, 'Второй участник'), peer);
+  details.append(element('dt', {}, 'Ваша роль'), role, peerLabel, peer);
+  const roster = element('section', { class: 'music-sync-together-stack', 'aria-labelledby': 'music-sync-together-members-title' });
+  const rosterHeading = element('div', { class: 'music-sync-together-code' });
+  const rosterTitle = element('h3', { id: 'music-sync-together-members-title' }, 'Участники');
+  const count = element('span', { class: 'music-sync-together-count', 'aria-label': 'Число участников' });
+  rosterHeading.append(rosterTitle, count);
+  const roomStatus = element('p', { class: 'music-sync-together-subtitle', role: 'status' });
+  const namesHint = element('p', { class: 'music-sync-together-subtitle music-sync-together-hint' }, 'Имена временные, только для этой комнаты.');
+  const members = element('ul', { class: 'music-sync-together-members', 'aria-label': 'Участники комнаты', tabindex: '0', hidden: '' });
+  roster.append(rosterHeading, roomStatus, namesHint, members);
   const playback = element('div', { class: 'music-sync-together-stack', hidden: '' });
   const playbackError = element('p', { class: 'music-sync-together-error', role: 'alert' });
   const retry = element('button', { type: 'button' }, 'Повторить синхронизацию');
@@ -117,12 +132,13 @@
   const swapMessage = element('p');
   const countdown = element('p', { class: 'music-sync-together-subtitle', role: 'timer' });
   const confirm = element('button', { type: 'button', 'data-primary': '' }, 'Подтвердить смену');
-  swapRequest.append(swapMessage, countdown, confirm);
+  const cancelTransfer = element('button', { type: 'button' }, 'Отменить передачу');
+  swapRequest.append(swapMessage, countdown, confirm, cancelTransfer);
   const actions = element('div', { class: 'music-sync-together-actions' });
   const swap = element('button', { type: 'button' }, 'Сменить роли');
   const leave = element('button', { type: 'button' }, 'Выйти');
   actions.append(swap, leave);
-  room.append(codeHeading, codeRow, details, playback, swapRequest, actions);
+  room.append(codeHeading, codeRow, roster, details, playback, swapRequest, actions);
   panel.append(title, connection, error, enter, room);
   document.body.append(panel);
 
@@ -133,6 +149,75 @@
   let sidebar;
   let warning;
   let frame = 0;
+  const participantRows = new Map();
+  const participantNames = new Map();
+  let nextParticipantNumber = 2;
+  let rosterCode;
+
+  function paintParticipants() {
+    if (rosterCode !== snapshot.code) {
+      participantRows.forEach(row => row.root.remove());
+      participantRows.clear();
+      participantNames.clear();
+      nextParticipantNumber = 2;
+      rosterCode = snapshot.code;
+    }
+    const participants = new Map();
+    if (Array.isArray(snapshot.participants)) {
+      for (const participant of snapshot.participants) {
+        if (participant && typeof participant.participantId === 'string' && participant.participantId &&
+            !participants.has(participant.participantId)) participants.set(participant.participantId, participant);
+      }
+    }
+    const known = Array.isArray(snapshot.participants);
+    const capacity = Number.isSafeInteger(snapshot.capacity) && snapshot.capacity > 0 ? snapshot.capacity : undefined;
+    setText(count, known ? `${participants.size}${capacity ? `/${capacity}` : ''}` : '—');
+    const current = snapshot.status === 'connected';
+    setText(roomStatus, !known ? 'Список участников пока недоступен.' :
+      !current ? 'Состав комнаты может быть неактуален.' :
+      capacity && participants.size >= capacity ? 'Комната заполнена' :
+      participants.size <= 1 ? 'Ожидание участников' : 'Можно пригласить участников');
+    namesHint.hidden = participants.size === 0;
+    members.hidden = participants.size === 0;
+    peer.hidden = peerLabel.hidden = known;
+    for (const [id, row] of participantRows) {
+      if (!participants.has(id)) {
+        row.root.remove();
+        participantRows.delete(id);
+      }
+    }
+    let index = 0;
+    for (const [id, participant] of participants) {
+      let row = participantRows.get(id);
+      if (!row) {
+        const root = element('li', { class: 'music-sync-together-member' });
+        const heading = element('div', { class: 'music-sync-together-member-heading' });
+        const name = element('span', { class: 'music-sync-together-member-name' });
+        const badge = element('span', { class: 'music-sync-together-member-role' });
+        const status = element('span', { class: 'music-sync-together-member-status' });
+        heading.append(name, badge);
+        const transfer = element('button', { type: 'button' }, 'Передать управление');
+        transfer.addEventListener('click', () => void run(api.transferLeadership, id));
+        root.append(heading, status, transfer);
+        row = { root, name, badge, status, transfer };
+        participantRows.set(id, row);
+      }
+      const self = id === snapshot.selfParticipantId;
+      if (!self && !participantNames.has(id)) participantNames.set(id, `Участник ${nextParticipantNumber++}`);
+      setText(row.name, self ? 'Вы' : participantNames.get(id));
+      setText(row.badge, participant.role === 'leader' ? 'Ведущий' : participant.role === 'listener' ? 'Слушатель' : 'Роль неизвестна');
+      const status = !current ? self && snapshot.status === 'reconnecting' ? 'Переподключается' : 'Статус неизвестен' :
+        participant.connected === true ? 'Подключён' : participant.connected === false ? 'Временно отсутствует' : 'Статус неизвестен';
+      setText(row.status, status);
+      // Updating attributes and text keeps the existing nodes, focus and scroll position.
+      row.transfer.hidden = !snapshot.supportsLeadershipTransfer || snapshot.role !== 'leader' || self || participant.role !== 'listener';
+      row.transfer.disabled = pending || !current || !participant.connected || Boolean(snapshot.transfer);
+      row.root.dataset.self = String(self);
+      row.root.dataset.leader = String(participant.role === 'leader');
+      if (members.children[index] !== row.root) members.insertBefore(row.root, members.children[index] ?? null);
+      index++;
+    }
+  }
 
   function position() {
     if (panel.hidden) return;
@@ -147,12 +232,17 @@
   function paint() {
     const hasRoom = Boolean(snapshot.code);
     const swapPending = Boolean(snapshot.swap?.requestedBy);
+    const transfer = snapshot.transfer;
+    const transferIncoming = transfer?.targetParticipantId === snapshot.selfParticipantId;
+    const transferOutgoing = transfer?.initiatorParticipantId === snapshot.selfParticipantId;
     const incoming = swapPending && snapshot.swap.requestedBy !== snapshot.role;
-    const canSwap = snapshot.status === 'connected' && snapshot.peerConnected && snapshot.swap?.id && !pending;
+    const groupState = Array.isArray(snapshot.participants);
+    const canSwap = !groupState && snapshot.status === 'connected' && snapshot.peerConnected && snapshot.swap?.id && !pending;
     const waiting = !hasRoom && (snapshot.status === 'connecting' || snapshot.status === 'reconnecting');
     const blocked = pending || waiting;
     const errorCode = snapshot.status === 'ended' && snapshot.error ? snapshot.error : commandError ?? snapshot.error;
-    setText(connection, statuses[snapshot.status] ?? statuses.idle);
+    setText(connection, errorCode && !hasRoom ? 'Ошибка подключения' :
+      statuses[snapshot.status] ?? 'Статус подключения неизвестен');
     error.hidden = !errorCode;
     setText(error, errorCode ? errors[errorCode] ?? 'Операция завершилась с ошибкой. Проверьте журнал.' : '');
     enter.hidden = hasRoom;
@@ -165,7 +255,9 @@
     setText(code, snapshot.code ?? '');
     setText(role, snapshot.role === 'leader' ? 'Ведущий' : snapshot.role === 'listener' ? 'Слушатель' : '—');
     setText(peer, snapshot.status === 'reconnecting' ? 'Статус неизвестен' :
-      snapshot.peerConnected ? 'В комнате' : 'Ожидание участника');
+      snapshot.status === 'connected' && snapshot.peerConnected === true ? 'В комнате' :
+      snapshot.status === 'connected' && snapshot.peerConnected === false ? 'Ожидание участников' : 'Статус неизвестен');
+    paintParticipants();
     playback.hidden = !snapshot.playbackError;
     setText(playbackError, snapshot.playbackError
       ? playbackErrors[snapshot.playbackError] ?? 'Не удалось синхронизировать воспроизведение.'
@@ -173,12 +265,17 @@
     retry.disabled = pending || snapshot.status !== 'connected';
     swap.disabled = !canSwap || swapPending;
     leave.disabled = pending;
-    swapRequest.hidden = !swapPending;
-    setText(swapMessage, incoming ? 'Второй участник предлагает сменить роли.' : 'Запрос отправлен. Ожидание ответа.');
-    const seconds = Math.ceil(Math.max(0, snapshot.swap?.remainingMs ?? 0) / 1000);
+    swap.hidden = groupState;
+    swapRequest.hidden = transfer ? !transferIncoming && !transferOutgoing : groupState || !swapPending;
+    cancelTransfer.hidden = !transfer;
+    cancelTransfer.disabled = pending || snapshot.status !== 'connected';
+    setText(swapMessage, transfer ? transferIncoming ? 'Ведущий предлагает вам управление комнатой.' : 'Запрос отправлен выбранному участнику. Ожидание ответа.' :
+      incoming ? 'Другой участник предлагает сменить роли.' : 'Запрос отправлен. Ожидание ответа.');
+    const seconds = Math.ceil(Math.max(0, transfer?.remainingMs ?? snapshot.swap?.remainingMs ?? 0) / 1000);
     setText(countdown, `Осталось ${seconds} с`);
-    confirm.hidden = !incoming;
-    confirm.disabled = !canSwap || seconds === 0;
+    confirm.hidden = transfer ? !transferIncoming : !incoming;
+    setText(confirm, transfer ? 'Принять управление' : 'Подтвердить смену');
+    confirm.disabled = transfer ? pending || snapshot.status !== 'connected' || seconds === 0 : !canSwap || seconds === 0;
     position();
   }
 
@@ -231,7 +328,9 @@
     void run(api.join, input.value);
   });
   swap.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
-  confirm.addEventListener('click', () => void run(api.swapRoles, snapshot.swap?.id));
+  confirm.addEventListener('click', () => void (snapshot.transfer
+    ? run(api.acceptLeadership, snapshot.transfer.id) : run(api.swapRoles, snapshot.swap?.id)));
+  cancelTransfer.addEventListener('click', () => void run(api.cancelLeadership, snapshot.transfer?.id));
   retry.addEventListener('click', () => void run(api.retryPlayback));
   leave.addEventListener('click', () => void run(api.leave));
   copy.addEventListener('click', async () => {
@@ -247,6 +346,7 @@
     }
   });
   api.subscribe(state => {
+    if (!state || typeof state !== 'object' || Array.isArray(state)) state = { status: 'idle' };
     if (state.code !== snapshot.code || state.status !== snapshot.status) commandError = undefined;
     if (state.code && state.code !== snapshot.code) input.value = '';
     snapshot = state;

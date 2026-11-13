@@ -17,7 +17,8 @@ jobs:
         with:
           dotnet-version: '10.0.x'
       - run: dotnet restore MusicSync.slnx
-      - run: dotnet build MusicSync.slnx -c Release --no-restore
+      - run: dotnet format MusicSync.slnx --verify-no-changes --no-restore
+      - run: dotnet build MusicSync.slnx -c Release --no-restore -warnaserror
       - run: dotnet test MusicSync.slnx -c Release --no-build
 
   publish-together:
@@ -62,5 +63,5 @@ jobs:
           git ls-files -z -- '*.js' '*.cjs' | while IFS= read -r -d '' file; do
             node --check -- "$file"
           done
-      - name: Run Sonata tests
-        run: node --test tests/MusicSync.Tests/SonataPlayer.test.cjs
+      - name: Run JavaScript tests
+        run: node --test tests/MusicSync.Tests/*.test.cjs

@@ -17,14 +17,15 @@ namespace MusicSync.Server
             builder.Logging.AddFilter("Microsoft.AspNetCore.Hosting.Diagnostics", LogLevel.Warning);
             string mode = builder.Configuration["Sync:Mode"] ?? "Loopback";
             int port = builder.Configuration.GetValue("Sync:Port", mode == "Tls" ? 8443 : 5050);
-            int maxConnections = builder.Configuration.GetValue("Sync:MaxConnections", 32);
             int maxRooms = builder.Configuration.GetValue("Sync:MaxRooms", 16);
+            int capacity = builder.Configuration.GetValue("Sync:MaxParticipantsPerRoom", 10);
+            int maxConnections = builder.Configuration.GetValue("Sync:MaxConnections", maxRooms * capacity + 16);
             int maxRoomsPerSource = builder.Configuration.GetValue("Sync:MaxRoomsPerSource", 4);
             int maxRoomCreationsPerSource = builder.Configuration.GetValue("Sync:MaxRoomCreationsPerSource", 8);
             int roomCreationWindowSeconds = builder.Configuration.GetValue("Sync:RoomCreationWindowSeconds", 60);
             int graceSeconds = builder.Configuration.GetValue("Sync:GraceSeconds", 90);
-            if (port is < 0 or > 65535 || maxConnections is < 2 or > 256 ||
-                maxRooms is < 1 or > 128 || maxRoomsPerSource is < 1 or > 128 ||
+            if (port is < 0 or > 65535 || maxConnections is < 2 or > 1296 ||
+                maxRooms is < 1 or > 128 || capacity is < 1 or > 10 || maxRoomsPerSource is < 1 or > 128 ||
                 maxRoomCreationsPerSource is < 1 or > 128 || roomCreationWindowSeconds is < 1 or > 3600 ||
                 graceSeconds is < 5 or > 600)
                 throw new InvalidOperationException("Invalid MusicSync limits or port.");
@@ -36,8 +37,8 @@ namespace MusicSync.Server
             // Keep framework-wide forwarding switches from changing the peer IP before the access check.
             builder.Services.PostConfigure<ForwardedHeadersOptions>(options => options.ForwardedHeaders = ForwardedHeaders.None);
             var clock = new MonotonicClock();
-            var rooms = new RoomRegistry(clock, maxRooms, maxRoomsPerSource, maxRoomCreationsPerSource,
-                TimeSpan.FromSeconds(roomCreationWindowSeconds), TimeSpan.FromSeconds(graceSeconds));
+            var rooms = new RoomRegistry(clock, maxRooms, capacity, TimeSpan.FromSeconds(graceSeconds),
+                maxRoomsPerSource, maxRoomCreationsPerSource, TimeSpan.FromSeconds(roomCreationWindowSeconds));
             var slots = new SemaphoreSlim(maxConnections);
 
             builder.WebHost.ConfigureKestrel(kestrel =>
@@ -116,8 +117,10 @@ namespace MusicSync.Server
                 }
                 try
                 {
-                    string? subProtocol = context.WebSockets.WebSocketRequestedProtocols.Contains(Protocol.RoleSwapSubProtocol)
-                        ? Protocol.RoleSwapSubProtocol : null;
+                    string? subProtocol = context.WebSockets.WebSocketRequestedProtocols.Contains(Protocol.LeadershipTransferSubProtocol)
+                        ? Protocol.LeadershipTransferSubProtocol
+                        : context.WebSockets.WebSocketRequestedProtocols.Contains(Protocol.RoleSwapSubProtocol)
+                            ? Protocol.RoleSwapSubProtocol : null;
                     var source = context.Connection.RemoteIpAddress ?? IPAddress.None;
                     if (source.IsIPv4MappedToIPv6)
                         source = source.MapToIPv4();
@@ -128,13 +131,16 @@ namespace MusicSync.Server
             });
             var maintenance = new Timer(_ => rooms.Prune(), null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
             app.Lifetime.ApplicationStopped.Register(maintenance.Dispose);
+            var reports = new Timer(_ => rooms.FlushReports(), null, TimeSpan.FromMilliseconds(250), TimeSpan.FromMilliseconds(250));
+            app.Lifetime.ApplicationStopped.Register(reports.Dispose);
             return app;
         }
 
         private static async Task ServeAsync(WebSocket socket, IPAddress source, RoomRegistry rooms, MonotonicClock clock,
             ILogger logger, CancellationToken request, CancellationToken stopping)
         {
-            using var peer = new RoomPeer(socket.SubProtocol == Protocol.RoleSwapSubProtocol);
+            using var peer = new RoomPeer(socket.SubProtocol is Protocol.RoleSwapSubProtocol or Protocol.LeadershipTransferSubProtocol,
+                socket.SubProtocol == Protocol.LeadershipTransferSubProtocol);
             using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(request, stopping, peer.Disconnect);
             var token = lifetime.Token;
             var writer = WriteAsync();
@@ -210,7 +216,7 @@ namespace MusicSync.Server
                     }
                     lifetime.CancelAfter(TimeSpan.FromSeconds(1));
                 }
-                catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException)
+                catch (Exception ex) when (ex is OperationCanceledException or WebSocketException or IOException or InvalidDataException)
                 {
                     await lifetime.CancelAsync();
                 }
